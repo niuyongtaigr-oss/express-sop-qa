@@ -11,11 +11,13 @@ from fastapi import Request
 from app.config import get_settings  # re-export, 路由统一从 deps 拿依赖
 from app.services.chat_service import ChatService
 from app.services.eval_service import EvalService
+from app.services.feedback_service import FeedbackStore
 from app.services.rag_service import RagService
 from app.services.session_service import SessionStore
 
 __all__ = ["get_settings", "get_rag_service", "get_chat_service",
-           "get_eval_service", "get_eval_tasks", "get_session_store"]
+           "get_eval_service", "get_eval_tasks", "get_session_store",
+           "get_feedback_store"]
 
 
 def get_rag_service(request: Request) -> RagService:
@@ -38,3 +40,8 @@ def get_eval_tasks(request: Request) -> dict:
 def get_session_store(request: Request) -> SessionStore:
     """多轮会话存储 (内存态 LRU+TTL, 由 lifespan 创建)"""
     return request.app.state.sessions
+
+
+def get_feedback_store(request: Request) -> FeedbackStore:
+    """用户反馈存储 (JSONL 持久化, 由 lifespan 创建)"""
+    return request.app.state.feedback_store

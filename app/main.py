@@ -41,6 +41,7 @@ async def lifespan(app: FastAPI):
     from app.infrastructure.vector_store import create_vector_store
     from app.services.chat_service import ChatService
     from app.services.eval_service import EvalService
+    from app.services.feedback_service import FeedbackStore
     from app.services.rag_service import RagService
     from app.services.session_service import SessionStore
 
@@ -77,6 +78,7 @@ async def lifespan(app: FastAPI):
     app.state.eval_service = EvalService(rag_service, llm, settings)
     app.state.eval_tasks = {}
     app.state.sessions = sessions
+    app.state.feedback_store = FeedbackStore(settings.feedback_file)
     logger.info("应用就绪")
     try:
         yield

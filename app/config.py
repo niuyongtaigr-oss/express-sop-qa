@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     eval_cases_path: str = "data/eval_cases.json"  # 结构化评测集 (不存在则用内置)
     eval_judge: bool = True                         # 是否启用 LLM-as-Judge 质量评分
     eval_history_path: str = "data/eval_history.jsonl"  # 评测历史 (回归对比用)
+    feedback_path: str = "data/feedback.jsonl"          # 用户反馈落盘 (P2-C)
 
     # ── 生产化 (限流/超时) ───────────────────────────────
     max_concurrency: int = 4        # 全局并发上限 (asyncio.Semaphore)
@@ -86,6 +87,11 @@ class Settings(BaseSettings):
     @property
     def eval_history_file(self) -> Path:
         p = Path(self.eval_history_path)
+        return p if p.is_absolute() else PROJECT_ROOT / p
+
+    @property
+    def feedback_file(self) -> Path:
+        p = Path(self.feedback_path)
         return p if p.is_absolute() else PROJECT_ROOT / p
 
 
