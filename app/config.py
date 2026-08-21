@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     multi_hop_max_rounds: int = 2               # 多轮检索最大轮数 (防死循环)
     multi_hop_similarity_threshold: float = 0.6  # 首轮命中即停止的相似度阈值
 
+    # ── 评测 (P2) ────────────────────────────────────────
+    eval_cases_path: str = "data/eval_cases.json"  # 结构化评测集 (不存在则用内置)
+    eval_judge: bool = True                         # 是否启用 LLM-as-Judge 质量评分
+
     # ── 生产化 (限流/超时) ───────────────────────────────
     max_concurrency: int = 4        # 全局并发上限 (asyncio.Semaphore)
     chat_timeout_s: float = 60.0    # /chat 单次请求超时
@@ -71,6 +75,11 @@ class Settings(BaseSettings):
     @property
     def chroma_path(self) -> Path:
         p = Path(self.chroma_dir)
+        return p if p.is_absolute() else PROJECT_ROOT / p
+
+    @property
+    def eval_cases_file(self) -> Path:
+        p = Path(self.eval_cases_path)
         return p if p.is_absolute() else PROJECT_ROOT / p
 
 

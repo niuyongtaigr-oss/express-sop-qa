@@ -13,10 +13,15 @@ class EvalRunResponse(BaseModel):
 class EvalCaseDetail(BaseModel):
     """单条评测用例结果"""
 
+    case_id: str = ""
     question: str
-    expect: str
+    expect: str = ""
     hit: bool
-    top_similarity: float
+    top_similarity: float = 0.0
+    answer: str | None = None          # LLM 生成答案 (启用 judge 时有)
+    faithfulness: float | None = None  # 忠实性 0-1
+    completeness: float | None = None  # 完整性 0-1
+    reason: str | None = None          # 评审理由 / judge_error 说明
 
 
 class EvalTaskResponse(BaseModel):
@@ -25,6 +30,11 @@ class EvalTaskResponse(BaseModel):
     task_id: str
     status: str  # pending / running / done / error
     hit_rate: float | None = None
+    faithfulness_avg: float | None = None
+    completeness_avg: float | None = None
+    judged_cases: int | None = None
     top_k: int | None = None
+    judge: bool | None = None
+    config: dict | None = None
     details: list[EvalCaseDetail] | None = None
     detail: str | None = None  # status=error 时的错误说明

@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
 
     app.state.rag_service = rag_service
     app.state.chat_service = ChatService(graph, sessions, settings)
-    app.state.eval_service = EvalService(rag_service)
+    app.state.eval_service = EvalService(rag_service, llm, settings)
     app.state.eval_tasks = {}
     app.state.sessions = sessions
     logger.info("应用就绪")

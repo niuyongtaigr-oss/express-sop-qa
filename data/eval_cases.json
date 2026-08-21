@@ -1,0 +1,38 @@
+[
+  {
+    "id": "breakage-1",
+    "question": "包裹破损了怎么处理?",
+    "expect_keywords": ["破损", "异常登记"],
+    "required_points": ["异常登记", "拍照留存", "贵重物品2小时内备案"]
+  },
+  {
+    "id": "claim-1",
+    "question": "理赔的流程是什么?",
+    "expect_keywords": ["理赔"],
+    "required_points": ["提交照片和运单号", "省区审核", "总公司理赔部打款"]
+  },
+  {
+    "id": "fine-1",
+    "question": "暴力分拣致破损罚多少钱?",
+    "expect_keywords": ["500"],
+    "required_points": ["500元罚款", "暴力分拣"]
+  },
+  {
+    "id": "lost-1",
+    "question": "包裹遗失怎么赔偿?",
+    "expect_keywords": ["遗失"],
+    "required_points": ["保价金额赔偿", "未保价不超过运费3倍"]
+  },
+  {
+    "id": "lost-time-1",
+    "question": "疑似遗失预警后要多长时间完成找寻?",
+    "expect_keywords": ["遗失", "24小时"],
+    "required_points": ["24小时", "全网找寻"]
+  },
+  {
+    "id": "complaint-1",
+    "question": "客户投诉客服不跟进怎么办?",
+    "expect_keywords": ["投诉"],
+    "required_points": []
+  }
+]
