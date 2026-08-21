@@ -34,12 +34,20 @@ class Settings(BaseSettings):
     embed_model: str = "bge-m3"
 
     # ── 知识库 ───────────────────────────────────────────
-    sop_path: str = "data/sop.txt"        # SOP 文档 (相对项目根目录)
+    sop_path: str = "data/sop.txt"        # SOP 文档 (相对项目根目录, 默认文档)
+    sop_doc_id: str = "sop"               # 默认文档 ID (sop.txt 导入时使用)
     chroma_dir: str = "data/chroma"       # Chroma 持久化目录
     collection_name: str = "sop_knowledge"
     chunk_size: int = 200
     chunk_overlap: int = 40
     top_k: int = 3
+    retrieval_mode: str = "hybrid"        # hybrid=向量+BM25 融合(RRF) / vector=纯向量
+
+    # ── 多轮会话 (记忆) ──────────────────────────────────
+    session_ttl_s: int = 1800             # 会话空闲过期时间 (秒)
+    session_max_turns: int = 10           # 单会话保留的最大轮数 (超出丢最旧)
+    session_max_sessions: int = 2000      # 内存会话上限 (LRU 淘汰)
+    session_sweep_interval_s: int = 60    # 后台清理过期会话的间隔 (秒)
 
     # ── 编排 ─────────────────────────────────────────────
     multi_hop_max_rounds: int = 2               # 多轮检索最大轮数 (防死循环)

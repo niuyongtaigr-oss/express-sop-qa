@@ -58,10 +58,13 @@
 | 方法 | 路径 | 功能 | 鉴权 |
 |------|------|------|------|
 | GET | `/api/v1/health` | 健康检查：服务存活 + 索引 chunk 数 + Ollama 可达性 | 否 |
-| POST | `/api/v1/chat` | 智能问答主接口（意图识别→路由→回答），限流+超时降级 | 是* |
-| POST | `/api/v1/chat/stream` | 同上，SSE 分段推送（`data: {"delta": ...}`，结束 `data: [DONE]`） | 是* |
+| POST | `/api/v1/chat` | 智能问答主接口（意图识别→路由→回答），限流+超时降级，支持 `session_id` 多轮记忆 | 是* |
+| POST | `/api/v1/chat/stream` | 同上，SSE 真流式（token 级，事件带 `type` 字段，见下） | 是* |
 | POST | `/api/v1/rag/query` | 知识库直通查询（绕过编排，检索+生成，调试/评测用） | 是* |
-| POST | `/api/v1/rag/ingest` | 重建索引（默认幂等跳过；`?force=true` 强制重建） | 是* |
+| POST | `/api/v1/rag/ingest` | 导入默认 SOP 文档（默认幂等跳过；`?force=true` 清空重建） | 是* |
+| GET | `/api/v1/rag/docs` | 知识库文档清单（doc_id / title / chunk 数） | 是* |
+| POST | `/api/v1/rag/docs` | 增量导入/覆盖文档（upsert：同 doc_id 旧 chunk 先删后加） | 是* |
+| DELETE | `/api/v1/rag/docs/{doc_id}` | 删除文档及其全部 chunk | 是* |
 | POST | `/api/v1/eval/run` | 提交检索命中率评测（后台任务），返回 task_id | 是* |
 | GET | `/api/v1/eval/tasks/{task_id}` | 轮询评测结果（status/hit_rate/details） | 是* |
 
@@ -70,21 +73,43 @@
 ### 请求/响应示例
 
 ```bash
-# 智能问答
+# 智能问答 (带会话 ID, 多轮记忆共享上下文)
 curl -X POST http://127.0.0.1:8000/api/v1/chat \
   -H 'Content-Type: application/json' \
-  -d '{"question": "包裹破损了怎么申请理赔?"}'
-# → {"answer": "...", "intent": "rag_qa", "sources": [{"content","tags","similarity"}],
-#    "trace_id": "...", "elapsed_ms": 123}
+  -d '{"question": "包裹破损了怎么申请理赔?", "session_id": "sess-001"}'
+# → {"answer": "...", "intent": "rag_qa", "sources": [{"content","doc_id","title","tags","similarity"}],
+#    "trace_id": "...", "elapsed_ms": 123, "session_id": "sess-001"}
 
 # 知识库直通
 curl -X POST http://127.0.0.1:8000/api/v1/rag/query \
   -H 'Content-Type: application/json' -d '{"query": "理赔流程", "top_k": 3}'
 
+# 多文档管理 (P1.6)
+curl -X GET  http://127.0.0.1:8000/api/v1/rag/docs
+curl -X POST http://127.0.0.1:8000/api/v1/rag/docs \
+  -H 'Content-Type: application/json' \
+  -d '{"doc_id": "claim-rules", "title": "理赔细则", "content": "理赔时限..."}'
+curl -X DELETE http://127.0.0.1:8000/api/v1/rag/docs/claim-rules
+
 # 评测（异步任务）
 curl -X POST http://127.0.0.1:8000/api/v1/eval/run        # → {"task_id": "...", "status": "pending"}
 curl http://127.0.0.1:8000/api/v1/eval/tasks/<task_id>    # → {"status": "done", "hit_rate": ..., "details": [...]}
 ```
+
+### SSE 流式事件（`/chat/stream`，P0.2 真流式）
+
+逐 token 推送（不再按标点切段），事件均为 `data: {json}` 行 + 空行，结束 `data: [DONE]`：
+
+```
+data: {"type": "intent", "intent": "rag_qa", "reason": "..."}
+data: {"type": "answer_delta", "delta": "根据"}      # 若干条 token 增量
+data: {"type": "answer_delta", "delta": "申通..."}
+data: {"type": "sources", "sources": [...], "rounds": 1}   # multi_hop 时有 rounds
+data: {"type": "done", "trace_id": "...", "intent": "rag_qa"}
+data: [DONE]
+```
+
+超时降级插入 `{"type":"answer_delta","delta":"友好提示"}` 且 intent=degraded；出错插入 `{"type":"error","error":"..."}`。
 
 统一错误响应：`{"error": {"code": "...", "message": "...", "trace_id": "..."}}`
 
@@ -93,6 +118,8 @@ curl http://127.0.0.1:8000/api/v1/eval/tasks/<task_id>    # → {"status": "done
 全部走环境变量 / `.env`（前缀 `SOP_QA_`），示例见 `.env.example`。关键项：
 
 - `SOP_QA_LLM_MODEL` / `SOP_QA_EMBED_MODEL`：Ollama 模型（默认 qwen2.5:7b / bge-m3）
+- `SOP_QA_RETRIEVAL_MODE`：`hybrid`（向量+BM25 RRF 融合，默认）/ `vector`（纯向量）
+- `SOP_QA_SESSION_TTL_S` / `SOP_QA_SESSION_MAX_TURNS`：会话记忆过期时间 / 最大轮数
 - `SOP_QA_MAX_CONCURRENCY` / `SOP_QA_CHAT_TIMEOUT_S`：限流并发数 / 超时秒数
 - `SOP_QA_MULTI_HOP_MAX_ROUNDS` / `SOP_QA_MULTI_HOP_SIMILARITY_THRESHOLD`：多轮检索参数
 - `SOP_QA_API_KEY`：可选 API Key 鉴权
@@ -120,5 +147,21 @@ python3 scripts/run_eval.py
 - **安全**：配置全走 pydantic-settings + 环境变量；Pydantic 入参校验（长度/范围）；
   SSE 输出 `json.dumps` 序列化；异常捕获具体化并记日志；统一错误响应格式。
 - **扩展性**：LLM/Embedding/向量库 Protocol 抽象 + 工厂注入；路由版本化；服务层与 HTTP 层解耦。
-- **生产化**：`asyncio.Semaphore` 限流（超限排队）、`asyncio.wait_for` + fallback 超时降级、
+- **生产化**：`asyncio.Semaphore` 限流（超限排队）、`asyncio.wait_for`/`asyncio.timeout` + fallback 超时降级、
   结构化 JSON 日志 + contextvars trace_id 全链路串联。
+- **P0.1 多轮记忆**：`session_id` → `SessionStore`（内存 LRU + TTL + 后台清扫），
+  历史注入意图识别/直接回答/知识库生成节点，支持「那理赔要多久?」类追问。
+- **P0.2 真流式**：`graph.astream_events` 消费 `on_chat_model_stream` token 事件，SSE 按 token 推送。
+- **P0.4 LLM 改写**：multi_hop 首轮命中不足时由 LLM 结构化输出改写检索 query（替代硬编码拼接），
+  `keep_original=true` 提前停止防死循环。
+- **P1.5 混合检索**：向量 Top-N + BM25 Top-N → RRF 融合（无第三方依赖，字符 bigram 分词适配中文），
+  精确术语/编号召回更稳。
+- **P1.6 多文档知识库**：`/rag/docs` 增量导入/覆盖/删除，chunk 元数据带 doc_id/title，
+  替代单文件全量重建。
+
+## 测试
+
+```bash
+pip install -r requirements-dev.txt
+.venv/bin/python -m pytest tests/ -q     # 无需 Ollama (Stub LLM/向量库驱动)
+```

@@ -42,6 +42,7 @@ async def lifespan(app: FastAPI):
     from app.services.chat_service import ChatService
     from app.services.eval_service import EvalService
     from app.services.rag_service import RagService
+    from app.services.session_service import SessionStore
 
     embeddings = create_embedding_client(settings)
     llm = create_llm_client(settings)
@@ -54,13 +55,35 @@ async def lifespan(app: FastAPI):
 
     graph = build_chat_graph(rag_service, llm, settings)
 
+    sessions = SessionStore(
+        ttl_s=settings.session_ttl_s,
+        max_turns=settings.session_max_turns,
+        max_sessions=settings.session_max_sessions,
+    )
+    # 后台定期清理过期会话 (asyncio 任务, 关闭时取消)
+    stop_sweep = asyncio.Event()
+
+    async def _session_sweeper():
+        while not stop_sweep.is_set():
+            try:
+                await asyncio.wait_for(stop_sweep.wait(), settings.session_sweep_interval_s)
+            except asyncio.TimeoutError:
+                await asyncio.to_thread(sessions.sweep)
+
+    sweep_task = asyncio.create_task(_session_sweeper())
+
     app.state.rag_service = rag_service
-    app.state.chat_service = ChatService(graph, settings)
+    app.state.chat_service = ChatService(graph, sessions, settings)
     app.state.eval_service = EvalService(rag_service)
     app.state.eval_tasks = {}
+    app.state.sessions = sessions
     logger.info("应用就绪")
-    yield
-    logger.info("应用已关闭")
+    try:
+        yield
+    finally:
+        stop_sweep.set()
+        sweep_task.cancel()
+        logger.info("应用已关闭")
 
 
 def create_app() -> FastAPI:

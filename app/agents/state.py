@@ -9,6 +9,7 @@ class ChatState(TypedDict, total=False):
     """编排图在节点间传递的状态"""
 
     question: str
+    history: list[dict]    # 多轮会话历史: [{"role": "user"|"assistant", "content": str}]
     intent: str            # rag_qa / direct / multi_hop
     intent_reason: str
     answer: str
@@ -21,3 +22,10 @@ class IntentDecision(BaseModel):
 
     intent: Literal["rag_qa", "direct", "multi_hop"]
     reason: str
+
+
+class RewriteQuery(BaseModel):
+    """多轮检索的 query 改写输出 (LLM 改写替代硬编码拼接)"""
+
+    rewritten_query: str = ""
+    keep_original: bool = False  # 原问题已足够明确/无法改写时置 True, 提前停止

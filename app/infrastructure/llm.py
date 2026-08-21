@@ -7,6 +7,7 @@
 """
 
 import logging
+from collections.abc import AsyncIterator
 from typing import Protocol, Sequence, TypeVar
 
 from langchain_core.messages import BaseMessage
@@ -32,6 +33,11 @@ class LLMClient(Protocol):
         """结构化输出: 按 Pydantic schema 约束模型输出 (意图识别等场景)"""
         ...
 
+    def astream(self, messages: Sequence[BaseMessage]) -> AsyncIterator[str]:
+        """流式对话: 消息列表 → token 级文本增量 (SSE 真流式用)"""
+        ...
+        yield  # pragma: no cover - Protocol 仅声明
+
 
 class OllamaLLMClient:
     """ChatOllama 实现 — 懒加载底层客户端 (首次调用才初始化)"""
@@ -56,6 +62,13 @@ class OllamaLLMClient:
     def invoke(self, messages: Sequence[BaseMessage]) -> str:
         resp = self._get_chat().invoke(list(messages))
         return str(resp.content)
+
+    async def astream(self, messages: Sequence[BaseMessage]) -> AsyncIterator[str]:
+        """token 级流式输出 (ChatOllama.astream → AIMessageChunk)"""
+        async for chunk in self._get_chat().astream(list(messages)):
+            text = getattr(chunk, "content", "")
+            if text:
+                yield str(text)
 
     def structured_invoke(
         self, schema: type[T], messages: Sequence[BaseMessage]

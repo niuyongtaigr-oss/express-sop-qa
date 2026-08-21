@@ -36,7 +36,7 @@ def build_chat_graph(
     builder.add_node("intent", make_intent_node(llm))
     builder.add_node("rag_qa", make_rag_qa_node(rag_service))
     builder.add_node("direct", make_direct_node(llm))
-    builder.add_node("multi_hop", make_multi_hop_node(rag_service, settings))
+    builder.add_node("multi_hop", make_multi_hop_node(rag_service, llm, settings))
 
     builder.add_edge(START, "intent")
     builder.add_conditional_edges("intent", route)

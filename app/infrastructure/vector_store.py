@@ -1,23 +1,36 @@
-"""向量库封装 — Chroma PersistentClient 持久化实现
+"""向量库封装 — Chroma PersistentClient 持久化实现 (多文档 + 混合检索)
 
-职责与 RAGPipeline 参考实现等价:
-  ingest   — 分块 (RecursiveCharacterTextSplitter) → 打标签 → 向量化 → 重建集合
-  retrieve — 查询向量化 → 语义搜索 → Top-K (cosine distance → similarity)
+职责:
+  add_document    — 增量导入单篇文档 (分块 → 打标签 → 向量化 → upsert)
+  remove_document — 按 doc_id 删除文档及全部 chunk
+  list_documents  — 列出知识库文档清单 (从 chunk 元数据聚合, 无需独立注册表)
+  retrieve        — 混合检索: 向量 Top-K + BM25 Top-K → RRF 融合 (可切纯向量)
+  clear_all       — 清空全部文档 (force 重建用)
 
 持久化到 data/chroma/, 进程重启索引不丢; 与内存版 Client() 的本质区别。
+P1.5 混合检索: cosine 向量召回擅长语义相关, BM25 擅长精确术语/编号,
+  RRF (Reciprocal Rank Fusion) 融合两者排序, 提升整体召回质量。
 🏭 Java 对标: 对 ES 封装的 Repository 层
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from app.infrastructure.bm25 import BM25Index
 from app.infrastructure.embeddings import EmbeddingClient
 
 logger = logging.getLogger(__name__)
 
 # chunk 分类标签关键词 (快递 SOP 业务词)
 _TAG_KEYWORDS = ["破损", "遗失", "拦截", "理赔", "赔偿", "罚款"]
+
+# RRF 融合常数 (标准取值 60)
+_RRF_K = 60
+
+# Chroma id 只保留安全字符 (防止 doc_id 含路径分隔符等)
+_ID_SAFE = re.compile(r"[^A-Za-z0-9_.-]")
 
 
 @dataclass
@@ -37,17 +50,29 @@ class VectorStore(Protocol):
         """当前集合中的 chunk 数"""
         ...
 
-    def ingest(self, texts: list[str]) -> int:
-        """全量重建索引: 分块 → 向量化 → 入库, 返回 chunk 数"""
+    def add_document(self, doc_id: str, title: str, text: str) -> int:
+        """增量导入/覆盖单篇文档, 返回该文档的 chunk 数"""
+        ...
+
+    def remove_document(self, doc_id: str) -> int:
+        """删除文档及其全部 chunk, 返回删除数"""
+        ...
+
+    def list_documents(self) -> list[dict]:
+        """文档清单: [{doc_id, title, chunk_count}]"""
+        ...
+
+    def clear_all(self) -> None:
+        """清空全部文档 (重建场景)"""
         ...
 
     def retrieve(self, query: str, top_k: int = 3) -> list[RetrievedChunk]:
-        """语义检索 Top-K"""
+        """语义检索 Top-K (hybrid 模式为向量+BM25 融合)"""
         ...
 
 
 class ChromaVectorStore:
-    """Chroma 实现 — PersistentClient 持久化 + cosine 距离"""
+    """Chroma 实现 — PersistentClient 持久化 + cosine 距离 + 可选 BM25 混合"""
 
     def __init__(
         self,
@@ -56,6 +81,7 @@ class ChromaVectorStore:
         embeddings: EmbeddingClient,
         chunk_size: int = 200,
         chunk_overlap: int = 40,
+        retrieval_mode: str = "hybrid",
     ):
         # 重依赖延迟到实例化时加载 (不用知识库的进程不必付出启动成本)
         import chromadb
@@ -63,6 +89,7 @@ class ChromaVectorStore:
 
         self._embeddings = embeddings
         self._collection_name = collection_name
+        self._mode = retrieval_mode
         self._text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
@@ -73,49 +100,99 @@ class ChromaVectorStore:
             name=collection_name,
             metadata={"hnsw:space": "cosine"},
         )
+        self._bm25: BM25Index | None = None
+        if self._mode == "hybrid":
+            self._rebuild_bm25()
 
+    # ── 文档管理 ─────────────────────────────────────────
     def count(self) -> int:
         return self._collection.count()
 
-    def ingest(self, texts: list[str]) -> int:
-        """全量重建: 删旧集合 → 分块 → 打标签 → 向量化 → 批量入库"""
+    def add_document(self, doc_id: str, title: str, text: str) -> int:
+        """增量导入/覆盖单篇文档: 先删旧 chunk → 分块 → 打标签 → 向量化 → 入库"""
         from langchain_core.documents import Document
 
-        docs = [Document(page_content=t) for t in texts]
+        safe_id = _ID_SAFE.sub("_", doc_id) or "doc"
+        self._delete_chunks_by_doc(safe_id)  # upsert 语义: 覆盖旧版本
+
+        docs = [Document(page_content=text)]
         chunks = self._text_splitter.split_documents(docs)
         chunk_texts = [c.page_content for c in chunks]
         if not chunk_texts:
-            logger.warning("ingest 输入分块结果为空")
+            logger.warning("add_document 分块结果为空 doc_id=%s", doc_id)
             return 0
 
-        # 为每个 chunk 补充分类标签与序号
         metadatas = []
         for i, ct in enumerate(chunk_texts):
             tags = [kw for kw in _TAG_KEYWORDS if kw in ct]
             metadatas.append({
+                "doc_id": safe_id,
+                "title": title,
                 "tags": " + ".join(tags) if tags else "其他",
                 "chunk_index": i,
             })
 
         embeddings = self._embeddings.embed(chunk_texts)
-
-        # 重建集合 (幂等: 先删后建)
-        self._client.delete_collection(self._collection_name)
-        self._collection = self._client.create_collection(
-            name=self._collection_name,
-            metadata={"hnsw:space": "cosine"},
-        )
         self._collection.add(
             documents=chunk_texts,
             embeddings=embeddings,
             metadatas=metadatas,
-            ids=[f"{self._collection_name}-{i}" for i in range(len(chunk_texts))],
+            ids=[f"{self._collection_name}-{safe_id}-{i}" for i in range(len(chunk_texts))],
         )
-        logger.info("向量库重建完成: %d chunks", len(chunk_texts))
+        logger.info("文档导入完成 doc_id=%s chunks=%d", doc_id, len(chunk_texts))
+        self._rebuild_bm25()
         return len(chunk_texts)
 
+    def remove_document(self, doc_id: str) -> int:
+        safe_id = _ID_SAFE.sub("_", doc_id) or "doc"
+        ids = self._chunk_ids_by_doc(safe_id)
+        if ids:
+            self._collection.delete(ids=ids)
+            logger.info("文档已删除 doc_id=%s chunks=%d", doc_id, len(ids))
+            self._rebuild_bm25()
+        return len(ids)
+
+    def list_documents(self) -> list[dict]:
+        """从 chunk 元数据聚合文档清单 (无需独立注册表)"""
+        if self._collection.count() == 0:
+            return []
+        data = self._collection.get(include=["metadatas"])
+        metas = data.get("metadatas") or []
+        by_doc: dict[str, dict] = {}
+        order: list[str] = []
+        for m in metas:
+            doc_id = (m or {}).get("doc_id", "unknown")
+            if doc_id not in by_doc:
+                by_doc[doc_id] = {"doc_id": doc_id, "title": (m or {}).get("title", ""), "chunk_count": 0}
+                order.append(doc_id)
+            by_doc[doc_id]["chunk_count"] += 1
+        return [by_doc[d] for d in order]
+
+    def clear_all(self) -> None:
+        """清空全部文档 (重建场景)"""
+        total = self._collection.count()
+        if total:
+            data = self._collection.get(include=[])
+            ids = data.get("ids") or []
+            if ids:
+                self._collection.delete(ids=ids)
+        self._bm25 = BM25Index([], [])
+        logger.info("知识库已清空 (removed=%d)", total)
+
+    # ── 检索 ─────────────────────────────────────────────
     def retrieve(self, query: str, top_k: int = 3) -> list[RetrievedChunk]:
-        """查询向量化 → 语义搜索 → Top-K (cosine distance → similarity)"""
+        """混合检索 (hybrid): 向量 + BM25 → RRF 融合; 纯向量模式走老路径"""
+        total = self._collection.count()
+        if total == 0:
+            return []
+        if self._mode == "hybrid" and self._bm25 is not None:
+            vec = self._query_vector(query, top_k=top_k * 3)
+            bm = self._bm25.top_k(query, k=top_k * 3)
+            return self._hybrid_merge(vec, bm, top_k)
+        return self._query_vector(query, top_k=top_k)
+
+    # ── 内部: 向量查询 / RRF 融合 / BM25 维护 ─────────────
+    def _query_vector(self, query: str, top_k: int) -> list[RetrievedChunk]:
         total = self._collection.count()
         if total == 0:
             return []
@@ -135,6 +212,67 @@ class ChromaVectorStore:
             for i in range(len(results["ids"][0]))
         ]
 
+    def _hybrid_merge(
+        self,
+        vec: list[RetrievedChunk],
+        bm: list[tuple[int, float]],
+        top_k: int,
+    ) -> list[RetrievedChunk]:
+        """RRF 融合两个 Top-N 列表; BM25 独有命中用归一化分数映射相似度"""
+        rrf: dict[str, float] = {}
+        vec_by_content: dict[str, RetrievedChunk] = {}
+        for rank, c in enumerate(vec, 1):
+            vec_by_content[c.content] = c
+            rrf[c.content] = rrf.get(c.content, 0.0) + 1.0 / (_RRF_K + rank)
+
+        bm_meta: dict[str, dict] = {}
+        bm_score: dict[str, float] = {}
+        max_bm = 1.0
+        for rank, (pos, score) in enumerate(bm, 1):
+            content = self._bm25.texts[pos]
+            bm_meta[content] = self._bm25.metadatas[pos]
+            bm_score[content] = score
+            max_bm = max(max_bm, score)
+            rrf[content] = rrf.get(content, 0.0) + 1.0 / (_RRF_K + rank)
+
+        ranked = sorted(rrf.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
+        merged: list[RetrievedChunk] = []
+        for content, _ in ranked:
+            c = vec_by_content.get(content)
+            if c is not None:
+                merged.append(c)
+                continue
+            # BM25 独有命中: 归一化 BM25 分数映射到 (0.4, 0.9] 作为近似相似度
+            norm = bm_score.get(content, 0.0) / max_bm
+            merged.append(RetrievedChunk(
+                content=content,
+                metadata=bm_meta.get(content, {}),
+                distance=0.0,
+                similarity=round(0.4 + 0.5 * norm, 4),
+            ))
+        return merged
+
+    def _rebuild_bm25(self) -> None:
+        """从当前集合全量重建 BM25 (语料小, 变更后重建成本可忽略)"""
+        total = self._collection.count()
+        if total == 0:
+            self._bm25 = BM25Index([], [])
+            return
+        data = self._collection.get(include=["documents", "metadatas"])
+        texts = data.get("documents") or []
+        metas = data.get("metadatas") or []
+        self._bm25 = BM25Index(texts, metas)
+
+    # ── 内部: doc 过滤 ───────────────────────────────────
+    def _chunk_ids_by_doc(self, doc_id: str) -> list[str]:
+        data = self._collection.get(where={"doc_id": doc_id}, include=[])
+        return data.get("ids") or []
+
+    def _delete_chunks_by_doc(self, doc_id: str) -> None:
+        ids = self._chunk_ids_by_doc(doc_id)
+        if ids:
+            self._collection.delete(ids=ids)
+
 
 def create_vector_store(settings, embeddings: EmbeddingClient) -> VectorStore:
     """向量库工厂 — 按配置创建实现实例 (当前仅 Chroma)"""
@@ -145,4 +283,5 @@ def create_vector_store(settings, embeddings: EmbeddingClient) -> VectorStore:
         embeddings=embeddings,
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
+        retrieval_mode=settings.retrieval_mode,
     )

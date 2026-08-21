@@ -1,4 +1,4 @@
-"""RAG 资源 DTO — /rag/query, /rag/ingest"""
+"""RAG 资源 DTO — /rag/query, /rag/ingest, /rag/docs"""
 
 from pydantic import BaseModel, Field
 
@@ -23,4 +23,39 @@ class IngestResponse(BaseModel):
     """重建索引响应"""
 
     indexed_chunks: int
-    rebuilt: bool  # True=本次实际重建; False=索引已存在, 跳过
+    rebuilt: bool  # True=本次实际导入; False=索引已存在, 跳过
+
+
+class DocInfo(BaseModel):
+    """知识库文档清单项"""
+
+    doc_id: str
+    title: str
+    chunk_count: int
+
+
+class DocAddRequest(BaseModel):
+    """新增/覆盖一篇文档"""
+
+    doc_id: str | None = Field(
+        default=None, max_length=64,
+        description="文档 ID (缺省自动生成; 已存在则覆盖)",
+    )
+    title: str = Field(min_length=1, max_length=128)
+    content: str = Field(min_length=1, description="文档正文")
+
+
+class DocAddResponse(BaseModel):
+    doc_id: str
+    title: str
+    indexed_chunks: int
+
+
+class DocDeleteResponse(BaseModel):
+    doc_id: str
+    removed_chunks: int
+
+
+class ListDocsResponse(BaseModel):
+    documents: list[DocInfo]
+    total_chunks: int
