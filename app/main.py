@@ -74,7 +74,10 @@ async def lifespan(app: FastAPI):
     sweep_task = asyncio.create_task(_session_sweeper())
 
     app.state.rag_service = rag_service
-    app.state.chat_service = ChatService(graph, sessions, settings)
+    app.state.chat_service = ChatService(
+        graph, sessions, settings,
+        get_kb_version=lambda: rag_service.kb_version,
+    )
     app.state.eval_service = EvalService(rag_service, llm, settings)
     app.state.eval_tasks = {}
     app.state.sessions = sessions

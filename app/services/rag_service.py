@@ -49,6 +49,11 @@ class RagService:
         self._store = vector_store
         self._llm = llm
         self._settings = settings
+        self._version = 0  # 知识库版本: 任何写入变更 +1 (答案缓存失效用)
+
+    @property
+    def kb_version(self) -> int:
+        return self._version
 
     # ── 建索引 / 文档管理 ────────────────────────────────
     def ingest(self, force: bool = False) -> tuple[int, bool]:
@@ -69,6 +74,7 @@ class RagService:
             title=self._settings.sop_file.stem,
             text=text,
         )
+        self._version += 1
         logger.info("默认 SOP 文档导入完成: %d chunks, source=%s",
                     n, self._settings.sop_file)
         return n, True
@@ -76,12 +82,15 @@ class RagService:
     def add_document(self, doc_id: str, title: str, content: str) -> int:
         """增量导入/覆盖一篇文档 (upsert 语义), 返回 chunk 数"""
         n = self._store.add_document(doc_id, title, content)
+        self._version += 1
         logger.info("add_document doc_id=%s chunks=%d", doc_id, n)
         return n
 
     def remove_document(self, doc_id: str) -> int:
         """删除一篇文档及其全部 chunk, 返回删除数"""
         n = self._store.remove_document(doc_id)
+        if n:
+            self._version += 1
         logger.info("remove_document doc_id=%s removed=%d", doc_id, n)
         return n
 

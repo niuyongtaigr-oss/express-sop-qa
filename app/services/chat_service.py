@@ -18,11 +18,12 @@
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from app.config import Settings
 from app.core.logging import get_trace_id
+from app.services.cache_service import CacheStats, ChatCache
 from app.services.session_service import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -35,28 +36,77 @@ _ANSWER_NODES = {"rag_qa", "direct", "multi_hop"}
 
 
 class ChatService:
-    """智能问答编排服务 — 包装 LangGraph 图 + 限流/超时/降级 + 会话记忆"""
+    """智能问答编排服务 — 包装 LangGraph 图 + 限流/超时/降级 + 会话记忆 + 答案缓存"""
 
-    def __init__(self, graph: Any, sessions: SessionStore, settings: Settings):
+    def __init__(
+        self,
+        graph: Any,
+        sessions: SessionStore,
+        settings: Settings,
+        get_kb_version: Callable[[], int] | None = None,
+    ):
         self._graph = graph
         self._sessions = sessions
         self._settings = settings
+        self._get_kb_version = get_kb_version or (lambda: 0)
         # 进程级信号量: 超过 max_concurrency 的请求排队,
         # 防止突发流量把 Ollama (本地单点) 打挂
         self._semaphore = asyncio.Semaphore(settings.max_concurrency)
+        # 答案缓存 (P3-A): 无会话相同问题短 TTL 缓存
+        self._cache: ChatCache | None = None
+        self._cache_stats = CacheStats()
+        if settings.cache_enabled:
+            self._cache = ChatCache(
+                ttl_s=settings.cache_ttl_s,
+                max_entries=settings.cache_max_entries,
+            )
+
+    @property
+    def cache_stats(self) -> dict:
+        """缓存命中统计 (供 /metrics 与排查)"""
+        stats = self._cache_stats.snapshot()
+        if self._cache is not None:
+            stats.update(self._cache.stats())
+        return stats
+
+    def clear_cache(self) -> int:
+        """清空答案缓存 (知识库变更时由上层调用)"""
+        return self._cache.clear() if self._cache else 0
 
     async def chat(self, question: str, session_id: str | None = None) -> dict:
-        """非流式问答: 意图识别 → 路由 → 回答 (带限流 + 超时降级 + 记忆)"""
+        """非流式问答: 意图识别 → 路由 → 回答 (限流 + 超时降级 + 记忆 + 缓存)"""
         start = time.perf_counter()
-        result = await self._invoke_with_guard(question, session_id)
-        elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
+        cached = False
+        cache_key = None
+        # 只缓存无会话的请求: 有会话时答案依赖历史, 不能复用
+        if self._cache is not None and session_id is None:
+            cache_key = ChatCache.key_for(question, self._get_kb_version())
+            hit = self._cache.get(cache_key)
+            if hit is not None:
+                self._cache_stats.hit()
+                cached = True
+                result = hit
+            else:
+                self._cache_stats.miss()
+
+        if not cached:
+            result = await self._invoke_with_guard(question, session_id)
+            # 真实回答且无会话才写缓存; 降级/异常不入缓存
+            if (
+                self._cache is not None
+                and cache_key is not None
+                and result.get("intent") != "degraded"
+            ):
+                self._cache.set(cache_key, result)
+
+        elapsed_ms = round((time.perf_counter() - start) * 1000, 2) if not cached else 0.0
         intent = result.get("intent", "unknown")
         answer = result.get("answer", "")
         # 记忆回写: 只有真实回答才入库, 降级提示不污染历史
-        if intent != "degraded":
+        if not cached and intent != "degraded":
             self._sessions.add_turn(session_id, question, answer)
-        logger.info("chat_done intent=%s elapsed_ms=%.1f session=%s",
-                    intent, elapsed_ms, session_id)
+        logger.info("chat_done intent=%s elapsed_ms=%.1f session=%s cached=%s",
+                    intent, elapsed_ms, session_id, cached)
         return {
             "answer": answer,
             "intent": intent,
@@ -64,6 +114,7 @@ class ChatService:
             "trace_id": get_trace_id(),
             "elapsed_ms": elapsed_ms,
             "session_id": session_id,
+            "cached": cached,
         }
 
     async def stream(self, question: str, session_id: str | None = None) -> AsyncIterator[dict]:

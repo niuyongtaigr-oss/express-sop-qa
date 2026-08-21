@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     chat_timeout_s: float = 60.0    # /chat 单次请求超时
     rag_timeout_s: float = 30.0     # /rag/query 单次请求超时
 
+    # ── 答案缓存 (P3) ────────────────────────────────────
+    cache_enabled: bool = True      # 无会话相同问题的短 TTL 答案缓存
+    cache_ttl_s: float = 300.0      # 缓存过期秒数
+    cache_max_entries: int = 512    # 缓存条目上限 (LRU)
+
     # ── 安全 (可选) ──────────────────────────────────────
     # 配置后业务接口必须携带 X-API-Key; 不配置则放行并日志告警 (仅本地开发)
     api_key: str | None = None

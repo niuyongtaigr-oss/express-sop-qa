@@ -31,3 +31,4 @@ class ChatResponse(BaseModel):
     trace_id: str
     elapsed_ms: float
     session_id: str | None = None
+    cached: bool = False  # 是否命中答案缓存 (P3-A)
