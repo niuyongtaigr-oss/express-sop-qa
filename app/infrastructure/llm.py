@@ -1,7 +1,9 @@
-"""LLM 客户端抽象 — Protocol + ChatOllama 实现 + 懒加载工厂
+"""LLM 客户端抽象 — Protocol + Ollama/OpenAI 兼容实现 + 懒加载工厂 (P3-C)
 
-业务层只依赖 LLMClient 协议, 换实现 (OpenAI/通义/...) 只需新增一个
+业务层只依赖 LLMClient 协议, 换实现 (OpenAI/通义/DeepSeek...) 只需新增一个
 实现类和工厂分支, 不改任何业务代码。
+P3-C 多模型路由: 意图识别用小模型省成本, 回答用大模型 — 工厂按 model 参数
+创建任意模型的客户端, 编排层分开注入 intent_llm / answer_llm。
 
 🏭 Java 对标: 接口 + @Bean 工厂 (面向接口编程, DIP)
 """
@@ -77,11 +79,89 @@ class OllamaLLMClient:
         return router.invoke(list(messages))
 
 
-def create_llm_client(settings: Settings) -> LLMClient:
-    """LLM 工厂 — 按配置创建实现实例 (当前仅 Ollama)"""
-    logger.info("创建 LLM 客户端: model=%s base_url=%s",
-                settings.llm_model, settings.ollama_base_url)
+class OpenAILLMClient:
+    """OpenAI 兼容实现 (ChatOpenAI) — 通义/DeepSeek/本地 vLLM 均走 OpenAI 协议
+
+    懒加载 langchain_openai (仅 openai provider 且首次调用时才 import,
+    纯 Ollama 部署无需安装该依赖)。
+    """
+
+    def __init__(
+        self,
+        model: str,
+        base_url: str,
+        api_key: str | None = None,
+        temperature: float = 0,
+    ):
+        self._model = model
+        self._base_url = base_url
+        self._api_key = api_key or "sk-no-key"  # 本地 vLLM 等可能不需要 key
+        self._temperature = temperature
+        self._chat = None
+
+    def _get_chat(self):
+        if self._chat is None:
+            from langchain_openai import ChatOpenAI
+
+            self._chat = ChatOpenAI(
+                model=self._model,
+                base_url=self._base_url,
+                api_key=self._api_key,
+                temperature=self._temperature,
+            )
+        return self._chat
+
+    def invoke(self, messages: Sequence[BaseMessage]) -> str:
+        resp = self._get_chat().invoke(list(messages))
+        return str(resp.content)
+
+    async def astream(self, messages: Sequence[BaseMessage]) -> AsyncIterator[str]:
+        async for chunk in self._get_chat().astream(list(messages)):
+            text = getattr(chunk, "content", "")
+            if text:
+                yield str(text)
+
+    def structured_invoke(
+        self, schema: type[T], messages: Sequence[BaseMessage]
+    ) -> T:
+        router = self._get_chat().with_structured_output(schema)
+        return router.invoke(list(messages))
+
+
+def create_llm_client(
+    settings: Settings,
+    model: str | None = None,
+    provider: str | None = None,
+) -> LLMClient:
+    """LLM 工厂 — 按配置创建指定 provider/model 的客户端
+
+    model/provider 缺省走配置; provider=ollama|openai (OpenAI 兼容协议)。
+    """
+    provider = provider or settings.llm_provider
+    if model is None:
+        # openai provider 时回答模型优先 openai_model, 否则回退 llm_model
+        model = settings.openai_model or settings.llm_model if provider == "openai" else settings.llm_model
+    if provider == "openai":
+        logger.info("创建 OpenAI 兼容 LLM: model=%s base_url=%s",
+                    model, settings.openai_base_url)
+        return OpenAILLMClient(
+            model=model,
+            base_url=settings.openai_base_url,
+            api_key=settings.openai_api_key,
+        )
+    logger.info("创建 Ollama LLM: model=%s base_url=%s",
+                model, settings.ollama_base_url)
     return OllamaLLMClient(
-        model=settings.llm_model,
+        model=model,
         base_url=settings.ollama_base_url,
     )
+
+
+def create_intent_llm(settings: Settings) -> LLMClient | None:
+    """分意图路由: 配置了 intent_model 才创建独立的意图识别小模型客户端
+
+    未配置返回 None → 编排层回退用 answer_llm (保持原行为)。
+    """
+    if not settings.intent_model:
+        return None
+    return create_llm_client(settings, model=settings.intent_model)

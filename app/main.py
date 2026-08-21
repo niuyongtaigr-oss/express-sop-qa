@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
     # 重依赖延迟到启动时加载 (infrastructure 工厂内部懒 import)
     from app.agents.graph import build_chat_graph
     from app.infrastructure.embeddings import create_embedding_client
-    from app.infrastructure.llm import create_llm_client
+    from app.infrastructure.llm import create_intent_llm, create_llm_client
     from app.infrastructure.vector_store import create_vector_store
     from app.services.chat_service import ChatService
     from app.services.eval_service import EvalService
@@ -47,6 +47,8 @@ async def lifespan(app: FastAPI):
 
     embeddings = create_embedding_client(settings)
     llm = create_llm_client(settings)
+    # P3-C 多模型路由: 配置 intent_model 时意图识别走独立小模型
+    intent_llm = create_intent_llm(settings)
     vector_store = create_vector_store(settings, embeddings)
 
     rag_service = RagService(vector_store, llm, settings)
@@ -54,7 +56,7 @@ async def lifespan(app: FastAPI):
     n, rebuilt = await asyncio.to_thread(rag_service.ingest, False)
     logger.info("知识库就绪: %d chunks (rebuilt=%s)", n, rebuilt)
 
-    graph = build_chat_graph(rag_service, llm, settings)
+    graph = build_chat_graph(rag_service, llm, settings, intent_llm=intent_llm)
 
     sessions = SessionStore(
         ttl_s=settings.session_ttl_s,

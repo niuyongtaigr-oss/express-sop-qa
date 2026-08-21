@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     llm_model: str = "qwen2.5:7b"
     embed_model: str = "bge-m3"
 
+    # ── 多模型路由 (P3-C) ────────────────────────────────
+    llm_provider: str = "ollama"        # ollama | openai (OpenAI 兼容协议)
+    intent_model: str | None = None     # 意图识别专用模型 (None=与回答共用 llm_model)
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_api_key: str | None = None   # OpenAI 兼容服务密钥 (vLLM 本地可省略)
+    openai_model: str | None = None     # OpenAI provider 时的回答模型 (缺省=llm_model)
+
     # ── 知识库 ───────────────────────────────────────────
     sop_path: str = "data/sop.txt"        # SOP 文档 (相对项目根目录, 默认文档)
     sop_doc_id: str = "sop"               # 默认文档 ID (sop.txt 导入时使用)
