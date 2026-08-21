@@ -1,3 +1,5 @@
 {"ts": 1787288406.626797, "hit_rate": 0.3333, "faithfulness_avg": null, "completeness_avg": null, "judged_cases": 0, "top_k": 3, "judge": false, "config": {"retrieval_mode": "hybrid", "chunk_size": 200, "kb_chunks": 2}}
 {"ts": 1787288475.4658592, "hit_rate": 0.3333, "faithfulness_avg": null, "completeness_avg": null, "judged_cases": 0, "top_k": 3, "judge": false, "config": {"retrieval_mode": "hybrid", "chunk_size": 200, "kb_chunks": 2}}
 {"ts": 1787288544.2441456, "hit_rate": 0.3333, "faithfulness_avg": null, "completeness_avg": null, "judged_cases": 0, "top_k": 3, "judge": false, "config": {"retrieval_mode": "hybrid", "chunk_size": 200, "kb_chunks": 2}}
+{"ts": 1787288668.903266, "hit_rate": 0.3333, "faithfulness_avg": null, "completeness_avg": null, "judged_cases": 0, "top_k": 3, "judge": false, "config": {"retrieval_mode": "hybrid", "chunk_size": 200, "kb_chunks": 2}}
+{"ts": 1787288693.411728, "hit_rate": 0.3333, "faithfulness_avg": null, "completeness_avg": null, "judged_cases": 0, "top_k": 3, "judge": false, "config": {"retrieval_mode": "hybrid", "chunk_size": 200, "kb_chunks": 2}}

@@ -22,6 +22,11 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from app.config import Settings
+from app.core.metrics import (
+    EVAL_COMPLETENESS,
+    EVAL_FAITHFULNESS,
+    EVAL_HIT_RATE,
+)
 from app.infrastructure.llm import LLMClient
 from app.services.rag_service import RagService
 
@@ -226,6 +231,11 @@ class EvalService:
                 "judge": use_judge,
                 "config": result["config"],
             })
+        # Prometheus: 刷新最近一轮评测指标
+        EVAL_HIT_RATE.set(result["hit_rate"])
+        if result["faithfulness_avg"] is not None:
+            EVAL_FAITHFULNESS.set(result["faithfulness_avg"])
+            EVAL_COMPLETENESS.set(result["completeness_avg"])
         logger.info("eval_done hit_rate=%.4f faithfulness=%s completeness=%s cases=%d judged=%d",
                     hit_rate, result["faithfulness_avg"], result["completeness_avg"],
                     n, judged)

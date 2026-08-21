@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends
 
 from app.api.deps import get_rag_service, get_settings
 from app.config import Settings
+from app.core.metrics import KB_CHUNKS, OLLAMA_UP
 from app.schemas.common import HealthResponse
 from app.services.rag_service import RagService
 
@@ -24,7 +25,7 @@ async def health(
     rag_service: RagService = Depends(get_rag_service),
     settings: Settings = Depends(get_settings),
 ) -> HealthResponse:
-    """服务存活 + 知识库索引状态 + Ollama 可达性"""
+    """服务存活 + 知识库索引状态 + Ollama 可达性 (同时刷新 Prometheus 状态指标)"""
     ollama = "down"
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
@@ -32,6 +33,8 @@ async def health(
             ollama = "up" if r.status_code == 200 else "down"
     except httpx.HTTPError:
         ollama = "down"
+    OLLAMA_UP.set(1 if ollama == "up" else 0)
+    KB_CHUNKS.set(rag_service.indexed_chunks)
     return HealthResponse(
         status="ok",
         indexed_chunks=rag_service.indexed_chunks,

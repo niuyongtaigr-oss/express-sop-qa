@@ -65,11 +65,14 @@ async def lifespan(app: FastAPI):
     stop_sweep = asyncio.Event()
 
     async def _session_sweeper():
+        from app.core.metrics import SESSION_ACTIVE
+
         while not stop_sweep.is_set():
             try:
                 await asyncio.wait_for(stop_sweep.wait(), settings.session_sweep_interval_s)
             except asyncio.TimeoutError:
                 await asyncio.to_thread(sessions.sweep)
+                SESSION_ACTIVE.set(sessions.count())
 
     sweep_task = asyncio.create_task(_session_sweeper())
 

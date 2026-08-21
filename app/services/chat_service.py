@@ -23,6 +23,13 @@ from typing import Any
 
 from app.config import Settings
 from app.core.logging import get_trace_id
+from app.core.metrics import (
+    CACHE_HITS,
+    CACHE_MISSES,
+    CHAT_DEGRADED,
+    CHAT_DURATION,
+    CHAT_REQUESTS,
+)
 from app.services.cache_service import CacheStats, ChatCache
 from app.services.session_service import SessionStore
 
@@ -84,10 +91,12 @@ class ChatService:
             hit = self._cache.get(cache_key)
             if hit is not None:
                 self._cache_stats.hit()
+                CACHE_HITS.inc()
                 cached = True
                 result = hit
             else:
                 self._cache_stats.miss()
+                CACHE_MISSES.inc()
 
         if not cached:
             result = await self._invoke_with_guard(question, session_id)
@@ -105,6 +114,12 @@ class ChatService:
         # 记忆回写: 只有真实回答才入库, 降级提示不污染历史
         if not cached and intent != "degraded":
             self._sessions.add_turn(session_id, question, answer)
+        # Prometheus 指标
+        CHAT_REQUESTS.labels(intent).inc()
+        if not cached:
+            CHAT_DURATION.observe(elapsed_ms / 1000)
+        if intent == "degraded":
+            CHAT_DEGRADED.inc()
         logger.info("chat_done intent=%s elapsed_ms=%.1f session=%s cached=%s",
                     intent, elapsed_ms, session_id, cached)
         return {
