@@ -45,6 +45,7 @@ async def lifespan(app: FastAPI):
     from app.services.feedback_service import FeedbackStore
     from app.services.rag_service import RagService
     from app.services.session_service import SessionStore
+    from app.services.tenant_service import TenantRegistry
 
     embeddings = create_embedding_client(settings)
     llm = create_llm_client(settings)
@@ -96,6 +97,13 @@ async def lifespan(app: FastAPI):
     app.state.sessions = sessions
     app.state.feedback_store = FeedbackStore(settings.feedback_file)
     app.state.rate_limiter = rate_limiter
+    # P4 多租户: tenant_mode 时加载租户清单 (X-API-Key → tenant_id)
+    app.state.tenant_registry = TenantRegistry(
+        settings.tenants_file if settings.tenant_mode else None
+    )
+    if settings.tenant_mode:
+        logger.info("多租户模式已开启 (%d 租户)",
+                    len(app.state.tenant_registry.list_tenants()))
     logger.info("应用就绪")
     try:
         yield

@@ -16,10 +16,12 @@ from app.services.eval_service import EvalService
 from app.services.feedback_service import FeedbackStore
 from app.services.rag_service import RagService
 from app.services.session_service import SessionStore
+from app.services.tenant_service import DEFAULT_TENANT
 
 __all__ = ["get_settings", "get_rag_service", "get_chat_service",
            "get_eval_service", "get_eval_tasks", "get_session_store",
-           "get_feedback_store", "get_rate_limiter", "enforce_rate_limit"]
+           "get_feedback_store", "get_rate_limiter", "enforce_rate_limit",
+           "get_tenant_id"]
 
 
 def get_rag_service(request: Request) -> RagService:
@@ -68,3 +70,8 @@ async def enforce_rate_limit(
             "请求过于频繁, 已触发限流, 请稍后重试",
             retry_after_s=retry_after,
         )
+
+
+def get_tenant_id(request: Request) -> str:
+    """当前请求的租户 (P4 多租户): 由 verify_api_key 写入 request.state"""
+    return getattr(request.state, "tenant_id", DEFAULT_TENANT)

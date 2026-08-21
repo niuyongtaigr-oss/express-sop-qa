@@ -80,14 +80,21 @@ class ChatService:
         """清空答案缓存 (知识库变更时由上层调用)"""
         return self._cache.clear() if self._cache else 0
 
-    async def chat(self, question: str, session_id: str | None = None) -> dict:
+    async def chat(
+        self,
+        question: str,
+        session_id: str | None = None,
+        tenant_id: str = "default",
+    ) -> dict:
         """非流式问答: 意图识别 → 路由 → 回答 (限流 + 超时降级 + 记忆 + 缓存)"""
         start = time.perf_counter()
         cached = False
         cache_key = None
         # 只缓存无会话的请求: 有会话时答案依赖历史, 不能复用
         if self._cache is not None and session_id is None:
-            cache_key = ChatCache.key_for(question, self._get_kb_version())
+            cache_key = ChatCache.key_for(
+                question, self._get_kb_version(), tenant_id
+            )
             hit = self._cache.get(cache_key)
             if hit is not None:
                 self._cache_stats.hit()
@@ -99,7 +106,7 @@ class ChatService:
                 CACHE_MISSES.inc()
 
         if not cached:
-            result = await self._invoke_with_guard(question, session_id)
+            result = await self._invoke_with_guard(question, session_id, tenant_id)
             # 真实回答且无会话才写缓存; 降级/异常不入缓存
             if (
                 self._cache is not None
@@ -132,7 +139,12 @@ class ChatService:
             "cached": cached,
         }
 
-    async def stream(self, question: str, session_id: str | None = None) -> AsyncIterator[dict]:
+    async def stream(
+        self,
+        question: str,
+        session_id: str | None = None,
+        tenant_id: str = "default",
+    ) -> AsyncIterator[dict]:
         """流式问答 (SSE): 真 token 级流式, 事件见模块 docstring"""
         history = self._sessions.get_history(session_id)
         answer_parts: list[str] = []
@@ -144,7 +156,11 @@ class ChatService:
                 try:
                     async with asyncio.timeout(self._settings.chat_timeout_s):
                         async for ev in self._graph.astream_events(
-                            {"question": question, "history": history},
+                            {
+                                "question": question,
+                                "history": history,
+                                "tenant_id": tenant_id,
+                            },
                             version="v2",
                         ):
                             async for out in self._handle_event(ev, answer_parts):
@@ -206,7 +222,9 @@ class ChatService:
                     yield event
 
     # ── 内部: 限流 + 超时降级 ─────────────────────────────
-    async def _invoke_with_guard(self, question: str, session_id: str | None) -> dict:
+    async def _invoke_with_guard(
+        self, question: str, session_id: str | None, tenant_id: str = "default"
+    ) -> dict:
         async def _run() -> dict:
             async with self._semaphore:
                 # 先取历史再进线程池 (读取很快, 不占信号量窗口太久)
@@ -214,7 +232,11 @@ class ChatService:
                 # graph.invoke 是同步阻塞调用, 丢线程池执行
                 return await asyncio.to_thread(
                     self._graph.invoke,
-                    {"question": question, "history": history},
+                    {
+                        "question": question,
+                        "history": history,
+                        "tenant_id": tenant_id,
+                    },
                 )
 
         try:

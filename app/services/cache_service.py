@@ -28,9 +28,9 @@ class ChatCache:
         self._lock = threading.Lock()
 
     @staticmethod
-    def key_for(question: str, kb_version: int) -> str:
-        """缓存键: 问题 + 知识库版本 (版本变化即不同 key)"""
-        raw = f"{kb_version}|{question}"
+    def key_for(question: str, kb_version: int, tenant_id: str = "default") -> str:
+        """缓存键: 问题 + 知识库版本 + 租户 (版本/租户变化即不同 key)"""
+        raw = f"{kb_version}|{tenant_id}|{question}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def get(self, key: str) -> dict | None:

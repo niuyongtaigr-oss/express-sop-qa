@@ -57,20 +57,20 @@ class StubRag:
     def _chunk(self):
         return {
             "content": "包裹破损需拍照留存证据并联系网点",
-            "metadata": {"doc_id": "sop", "title": "默认", "tags": "破损"},
+            "metadata": {"doc_id": "sop", "title": "默认", "tags": "破损", "tenant_id": "shared"},
             "distance": 0.1,
             "similarity": self.similarity,
         }
 
-    def ask(self, query, top_k=None, history=None):
-        self.asks.append((query, history))
+    def ask(self, query, top_k=None, history=None, tenant_id="default"):
+        self.asks.append((query, history, tenant_id))
         return {
             "answer": "rag answer",
             "sources": [{"content": "c", "doc_id": "sop", "title": "默认", "tags": "", "similarity": 0.9}],
         }
 
-    def retrieve(self, query, top_k=None):
-        self.retrieves.append(query)
+    def retrieve(self, query, top_k=None, tenant_id="default"):
+        self.retrieves.append((query, tenant_id))
         return [self._chunk()]
 
     def generate(self, query, chunks, history=None):
@@ -103,8 +103,15 @@ def test_history_passed_to_rag_ask():
     llm, rag = StubLLM(intent="rag_qa"), StubRag()
     history = [{"role": "user", "content": "包裹破损了"}, {"role": "assistant", "content": "请拍照留存"}]
     _build(rag, llm).invoke({"question": "那理赔要多久?", "history": history})
-    _, h = rag.asks[0]
+    _, h, _ = rag.asks[0]
     assert h == history
+
+
+def test_tenant_id_passed_to_rag_ask():
+    llm, rag = StubLLM(intent="rag_qa"), StubRag()
+    _build(rag, llm).invoke({"question": "破损怎么办?", "tenant_id": "net-001"})
+    _, _, tid = rag.asks[0]
+    assert tid == "net-001"
 
 
 def test_history_passed_to_direct_llm():
@@ -126,9 +133,9 @@ def test_multi_hop_llm_rewrite_second_retrieve():
         rewrite=RewriteQuery(rewritten_query="破损 理赔 流程 时限", keep_original=False),
     )
     rag = StubRag(similarity=0.3)  # 低于阈值 0.6
-    result = _build(rag, llm).invoke({"question": "包裹破损怎么办"})
-    assert rag.retrieves[0] == "包裹破损怎么办"
-    assert rag.retrieves[1] == "破损 理赔 流程 时限"
+    result = _build(rag, llm).invoke({"question": "包裹破损怎么办", "tenant_id": "net-001"})
+    assert rag.retrieves[0] == ("包裹破损怎么办", "net-001")
+    assert rag.retrieves[1] == ("破损 理赔 流程 时限", "net-001")
     assert result["rounds"] == 2
     assert result["answer"] == "multi answer"
     assert rag.generates  # 最终走 generate
@@ -140,6 +147,7 @@ def test_multi_hop_keep_original_stops_early():
     rag = StubRag(similarity=0.3)
     result = _build(rag, llm).invoke({"question": "理赔流程是什么"})
     assert len(rag.retrieves) == 1  # 只检索了一轮
+    assert rag.retrieves[0] == ("理赔流程是什么", "default")  # 缺省租户
     assert result["rounds"] == 1
 
 

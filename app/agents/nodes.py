@@ -87,11 +87,13 @@ def make_intent_node(llm: LLMClient):
 
 
 def make_rag_qa_node(rag_service: RagService):
-    """知识库问答节点: 检索 + 生成 (生成时带对话历史)"""
+    """知识库问答节点: 检索 + 生成 (生成时带对话历史, 检索按租户隔离)"""
 
     def rag_qa_node(state: ChatState) -> dict:
         result = rag_service.ask(
-            state["question"], history=state.get("history")
+            state["question"],
+            history=state.get("history"),
+            tenant_id=state.get("tenant_id", "default"),
         )
         return {"answer": result["answer"], "sources": result["sources"]}
 
@@ -123,10 +125,11 @@ def make_multi_hop_node(rag_service: RagService, llm: LLMClient, settings: Setti
         all_chunks: list[dict] = []
         query = state["question"]
         history = state.get("history")
+        tenant_id = state.get("tenant_id", "default")
         rounds = 0
         for rnd in range(1, settings.multi_hop_max_rounds + 1):
             rounds = rnd
-            chunks = rag_service.retrieve(query)
+            chunks = rag_service.retrieve(query, tenant_id=tenant_id)
             all_chunks.extend(chunks)
             # 命中度足够 → 停止; 否则 LLM 改写 query 再检索一轮
             if chunks and chunks[0]["similarity"] > settings.multi_hop_similarity_threshold:

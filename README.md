@@ -199,6 +199,9 @@ curl http://localhost:8000/api/v1/health
 - **P3-D 按 Key 限流**：`X-API-Key`/IP 令牌桶 + 每日配额，429 + `Retry-After`，
   与全局信号量叠加使用。
 - **P3-E Docker 部署**：`docker compose up -d` 一键起 app + Ollama（自动拉模型）。
+- **P4 多租户隔离**：`SOP_QA_TENANT_MODE=true` 后 `X-API-Key` 映射租户
+  （`data/tenants.json`），检索/文档按租户隔离；默认 SOP 进共享库（所有租户可检），
+  租户私有文档互不可见。
 
 ## 测试
 

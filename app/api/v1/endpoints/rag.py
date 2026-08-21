@@ -16,6 +16,7 @@ from app.api.deps import (
     enforce_rate_limit,
     get_rag_service,
     get_settings,
+    get_tenant_id,
 )
 from app.config import Settings
 from app.core.exceptions import DegradedError
@@ -44,12 +45,15 @@ async def rag_query(
     req: RagQueryRequest,
     rag_service: RagService = Depends(get_rag_service),
     settings: Settings = Depends(get_settings),
+    tenant_id: str = Depends(get_tenant_id),
 ) -> RagQueryResponse:
-    """知识库直通查询 (检索 + 生成), 带超时控制"""
+    """知识库直通查询 (检索 + 生成, 按租户隔离), 带超时控制"""
     try:
         # 检索/生成是同步阻塞调用, 丢线程池; 超时抛降级异常 (503)
         result = await asyncio.wait_for(
-            asyncio.to_thread(rag_service.ask, req.query, req.top_k),
+            asyncio.to_thread(
+                rag_service.ask, req.query, req.top_k, None, tenant_id
+            ),
             timeout=settings.rag_timeout_s,
         )
     except asyncio.TimeoutError:
@@ -72,9 +76,10 @@ async def rag_ingest(
 @router.get("/rag/docs", response_model=ListDocsResponse)
 async def rag_list_docs(
     rag_service: RagService = Depends(get_rag_service),
+    tenant_id: str = Depends(get_tenant_id),
 ) -> ListDocsResponse:
-    """知识库文档清单 (doc_id / title / chunk 数)"""
-    docs = await asyncio.to_thread(rag_service.list_documents)
+    """知识库文档清单 (本租户 + 共享库; doc_id / title / chunk 数)"""
+    docs = await asyncio.to_thread(rag_service.list_documents, tenant_id)
     return ListDocsResponse(
         documents=docs,
         total_chunks=sum(d["chunk_count"] for d in docs),
@@ -85,8 +90,9 @@ async def rag_list_docs(
 async def rag_add_doc(
     req: DocAddRequest,
     rag_service: RagService = Depends(get_rag_service),
+    tenant_id: str = Depends(get_tenant_id),
 ) -> DocAddResponse:
-    """增量导入/覆盖一篇文档 (upsert: 同 doc_id 旧 chunk 先删后加)"""
+    """增量导入/覆盖一篇文档到本租户 (upsert: 同 doc_id 旧 chunk 先删后加)"""
     doc_id = req.doc_id or f"doc-{uuid.uuid4().hex[:12]}"
     if not _DOC_ID_SAFE.match(doc_id):
         raise HTTPException(
@@ -94,7 +100,7 @@ async def rag_add_doc(
             detail="doc_id 仅允许字母/数字/._- , 长度 ≤64",
         )
     n = await asyncio.to_thread(
-        rag_service.add_document, doc_id, req.title, req.content
+        rag_service.add_document, doc_id, req.title, req.content, tenant_id
     )
     return DocAddResponse(doc_id=doc_id, title=req.title, indexed_chunks=n)
 
@@ -103,9 +109,12 @@ async def rag_add_doc(
 async def rag_delete_doc(
     doc_id: str,
     rag_service: RagService = Depends(get_rag_service),
+    tenant_id: str = Depends(get_tenant_id),
 ) -> DocDeleteResponse:
-    """删除一篇文档及其全部 chunk"""
-    removed = await asyncio.to_thread(rag_service.remove_document, doc_id)
+    """删除本租户的一篇文档及其全部 chunk (不能删共享库文档)"""
+    removed = await asyncio.to_thread(
+        rag_service.remove_document, doc_id, tenant_id
+    )
     if removed == 0:
         raise HTTPException(status_code=404, detail=f"文档不存在: {doc_id}")
     return DocDeleteResponse(doc_id=doc_id, removed_chunks=removed)

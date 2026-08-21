@@ -10,6 +10,7 @@ class ChatState(TypedDict, total=False):
 
     question: str
     history: list[dict]    # 多轮会话历史: [{"role": "user"|"assistant", "content": str}]
+    tenant_id: str         # 多租户 (P4): 检索/回答只在租户 + 共享库范围内
     intent: str            # rag_qa / direct / multi_hop
     intent_reason: str
     answer: str

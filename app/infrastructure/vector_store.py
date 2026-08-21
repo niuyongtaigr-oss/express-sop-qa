@@ -50,15 +50,17 @@ class VectorStore(Protocol):
         """当前集合中的 chunk 数"""
         ...
 
-    def add_document(self, doc_id: str, title: str, text: str) -> int:
+    def add_document(
+        self, doc_id: str, title: str, text: str, tenant_id: str = "default"
+    ) -> int:
         """增量导入/覆盖单篇文档, 返回该文档的 chunk 数"""
         ...
 
-    def remove_document(self, doc_id: str) -> int:
+    def remove_document(self, doc_id: str, tenant_id: str = "default") -> int:
         """删除文档及其全部 chunk, 返回删除数"""
         ...
 
-    def list_documents(self) -> list[dict]:
+    def list_documents(self, tenant_id: str = "default") -> list[dict]:
         """文档清单: [{doc_id, title, chunk_count}]"""
         ...
 
@@ -66,13 +68,19 @@ class VectorStore(Protocol):
         """清空全部文档 (重建场景)"""
         ...
 
-    def retrieve(self, query: str, top_k: int = 3) -> list[RetrievedChunk]:
-        """语义检索 Top-K (hybrid 模式为向量+BM25 融合)"""
+    def retrieve(
+        self, query: str, top_k: int = 3, tenant_id: str = "default"
+    ) -> list[RetrievedChunk]:
+        """语义检索 Top-K (hybrid 模式为向量+BM25 融合, 按租户过滤)"""
         ...
 
 
 class ChromaVectorStore:
-    """Chroma 实现 — PersistentClient 持久化 + cosine 距离 + 可选 BM25 混合"""
+    """Chroma 实现 — PersistentClient 持久化 + cosine 距离 + 可选 BM25 混合
+
+    P4 多租户: 每个 chunk 带 tenant_id 元数据; 检索/文档操作按
+    tenant_id + shared_tenant_id (共享库) 过滤。
+    """
 
     def __init__(
         self,
@@ -82,6 +90,7 @@ class ChromaVectorStore:
         chunk_size: int = 200,
         chunk_overlap: int = 40,
         retrieval_mode: str = "hybrid",
+        shared_tenant_id: str = "shared",
     ):
         # 重依赖延迟到实例化时加载 (不用知识库的进程不必付出启动成本)
         import chromadb
@@ -90,6 +99,7 @@ class ChromaVectorStore:
         self._embeddings = embeddings
         self._collection_name = collection_name
         self._mode = retrieval_mode
+        self._shared_tenant = shared_tenant_id
         self._text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
@@ -108,12 +118,14 @@ class ChromaVectorStore:
     def count(self) -> int:
         return self._collection.count()
 
-    def add_document(self, doc_id: str, title: str, text: str) -> int:
+    def add_document(
+        self, doc_id: str, title: str, text: str, tenant_id: str = "default"
+    ) -> int:
         """增量导入/覆盖单篇文档: 先删旧 chunk → 分块 → 打标签 → 向量化 → 入库"""
         from langchain_core.documents import Document
 
         safe_id = _ID_SAFE.sub("_", doc_id) or "doc"
-        self._delete_chunks_by_doc(safe_id)  # upsert 语义: 覆盖旧版本
+        self._delete_chunks_by_doc(safe_id, tenant_id)  # upsert 语义: 覆盖旧版本
 
         docs = [Document(page_content=text)]
         chunks = self._text_splitter.split_documents(docs)
@@ -128,6 +140,7 @@ class ChromaVectorStore:
             metadatas.append({
                 "doc_id": safe_id,
                 "title": title,
+                "tenant_id": tenant_id,
                 "tags": " + ".join(tags) if tags else "其他",
                 "chunk_index": i,
             })
@@ -137,33 +150,44 @@ class ChromaVectorStore:
             documents=chunk_texts,
             embeddings=embeddings,
             metadatas=metadatas,
-            ids=[f"{self._collection_name}-{safe_id}-{i}" for i in range(len(chunk_texts))],
+            ids=[f"{self._collection_name}-{tenant_id}-{safe_id}-{i}"
+                 for i in range(len(chunk_texts))],
         )
-        logger.info("文档导入完成 doc_id=%s chunks=%d", doc_id, len(chunk_texts))
+        logger.info("文档导入完成 doc_id=%s tenant=%s chunks=%d",
+                    doc_id, tenant_id, len(chunk_texts))
         self._rebuild_bm25()
         return len(chunk_texts)
 
-    def remove_document(self, doc_id: str) -> int:
+    def remove_document(self, doc_id: str, tenant_id: str = "default") -> int:
         safe_id = _ID_SAFE.sub("_", doc_id) or "doc"
-        ids = self._chunk_ids_by_doc(safe_id)
+        ids = self._chunk_ids_by_doc(safe_id, tenant_id)
         if ids:
             self._collection.delete(ids=ids)
-            logger.info("文档已删除 doc_id=%s chunks=%d", doc_id, len(ids))
+            logger.info("文档已删除 doc_id=%s tenant=%s chunks=%d",
+                        doc_id, tenant_id, len(ids))
             self._rebuild_bm25()
         return len(ids)
 
-    def list_documents(self) -> list[dict]:
-        """从 chunk 元数据聚合文档清单 (无需独立注册表)"""
+    def list_documents(self, tenant_id: str = "default") -> list[dict]:
+        """从 chunk 元数据聚合文档清单 (本租户 + 共享租户)"""
         if self._collection.count() == 0:
             return []
-        data = self._collection.get(include=["metadatas"])
+        data = self._collection.get(
+            where={"tenant_id": {"$in": [tenant_id, self._shared_tenant]}},
+            include=["metadatas"],
+        )
         metas = data.get("metadatas") or []
         by_doc: dict[str, dict] = {}
         order: list[str] = []
         for m in metas:
             doc_id = (m or {}).get("doc_id", "unknown")
             if doc_id not in by_doc:
-                by_doc[doc_id] = {"doc_id": doc_id, "title": (m or {}).get("title", ""), "chunk_count": 0}
+                by_doc[doc_id] = {
+                    "doc_id": doc_id,
+                    "title": (m or {}).get("title", ""),
+                    "tenant_id": (m or {}).get("tenant_id", ""),
+                    "chunk_count": 0,
+                }
                 order.append(doc_id)
             by_doc[doc_id]["chunk_count"] += 1
         return [by_doc[d] for d in order]
@@ -180,19 +204,30 @@ class ChromaVectorStore:
         logger.info("知识库已清空 (removed=%d)", total)
 
     # ── 检索 ─────────────────────────────────────────────
-    def retrieve(self, query: str, top_k: int = 3) -> list[RetrievedChunk]:
-        """混合检索 (hybrid): 向量 + BM25 → RRF 融合; 纯向量模式走老路径"""
+    def retrieve(
+        self, query: str, top_k: int = 3, tenant_id: str = "default"
+    ) -> list[RetrievedChunk]:
+        """混合检索 (hybrid): 向量 + BM25 → RRF 融合, 按租户过滤; 纯向量走老路径"""
         total = self._collection.count()
         if total == 0:
             return []
+        tenant_filter = {"tenant_id": {"$in": [tenant_id, self._shared_tenant]}}
         if self._mode == "hybrid" and self._bm25 is not None:
-            vec = self._query_vector(query, top_k=top_k * 3)
-            bm = self._bm25.top_k(query, k=top_k * 3)
+            vec = self._query_vector(query, top_k=top_k * 3, where=tenant_filter)
+            bm_all = self._bm25.top_k(query, k=top_k * 3)
+            # BM25 结果也按租户过滤 (元数据含 tenant_id)
+            bm = [
+                (pos, score) for pos, score in bm_all
+                if self._bm25.metadatas[pos].get("tenant_id") in
+                (tenant_id, self._shared_tenant)
+            ]
             return self._hybrid_merge(vec, bm, top_k)
-        return self._query_vector(query, top_k=top_k)
+        return self._query_vector(query, top_k=top_k, where=tenant_filter)
 
     # ── 内部: 向量查询 / RRF 融合 / BM25 维护 ─────────────
-    def _query_vector(self, query: str, top_k: int) -> list[RetrievedChunk]:
+    def _query_vector(
+        self, query: str, top_k: int, where: dict | None = None
+    ) -> list[RetrievedChunk]:
         total = self._collection.count()
         if total == 0:
             return []
@@ -200,6 +235,7 @@ class ChromaVectorStore:
         results = self._collection.query(
             query_embeddings=[q_emb],
             n_results=min(top_k, total),
+            where=where,
             include=["documents", "metadatas", "distances"],
         )
         return [
@@ -264,12 +300,15 @@ class ChromaVectorStore:
         self._bm25 = BM25Index(texts, metas)
 
     # ── 内部: doc 过滤 ───────────────────────────────────
-    def _chunk_ids_by_doc(self, doc_id: str) -> list[str]:
-        data = self._collection.get(where={"doc_id": doc_id}, include=[])
+    def _chunk_ids_by_doc(self, doc_id: str, tenant_id: str) -> list[str]:
+        data = self._collection.get(
+            where={"$and": [{"doc_id": doc_id}, {"tenant_id": tenant_id}]},
+            include=[],
+        )
         return data.get("ids") or []
 
-    def _delete_chunks_by_doc(self, doc_id: str) -> None:
-        ids = self._chunk_ids_by_doc(doc_id)
+    def _delete_chunks_by_doc(self, doc_id: str, tenant_id: str) -> None:
+        ids = self._chunk_ids_by_doc(doc_id, tenant_id)
         if ids:
             self._collection.delete(ids=ids)
 
@@ -284,4 +323,5 @@ def create_vector_store(settings, embeddings: EmbeddingClient) -> VectorStore:
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
         retrieval_mode=settings.retrieval_mode,
+        shared_tenant_id=settings.shared_tenant_id,
     )

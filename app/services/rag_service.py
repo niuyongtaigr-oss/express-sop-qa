@@ -73,29 +73,32 @@ class RagService:
             doc_id=self._settings.sop_doc_id,
             title=self._settings.sop_file.stem,
             text=text,
+            tenant_id=self._settings.shared_tenant_id,  # 默认 SOP 进共享库
         )
         self._version += 1
         logger.info("默认 SOP 文档导入完成: %d chunks, source=%s",
                     n, self._settings.sop_file)
         return n, True
 
-    def add_document(self, doc_id: str, title: str, content: str) -> int:
+    def add_document(
+        self, doc_id: str, title: str, content: str, tenant_id: str = "default"
+    ) -> int:
         """增量导入/覆盖一篇文档 (upsert 语义), 返回 chunk 数"""
-        n = self._store.add_document(doc_id, title, content)
+        n = self._store.add_document(doc_id, title, content, tenant_id=tenant_id)
         self._version += 1
-        logger.info("add_document doc_id=%s chunks=%d", doc_id, n)
+        logger.info("add_document doc_id=%s tenant=%s chunks=%d", doc_id, tenant_id, n)
         return n
 
-    def remove_document(self, doc_id: str) -> int:
-        """删除一篇文档及其全部 chunk, 返回删除数"""
-        n = self._store.remove_document(doc_id)
+    def remove_document(self, doc_id: str, tenant_id: str = "default") -> int:
+        """删除一篇文档及其全部 chunk (仅限本租户), 返回删除数"""
+        n = self._store.remove_document(doc_id, tenant_id=tenant_id)
         if n:
             self._version += 1
-        logger.info("remove_document doc_id=%s removed=%d", doc_id, n)
+        logger.info("remove_document doc_id=%s tenant=%s removed=%d", doc_id, tenant_id, n)
         return n
 
-    def list_documents(self) -> list[dict]:
-        return self._store.list_documents()
+    def list_documents(self, tenant_id: str = "default") -> list[dict]:
+        return self._store.list_documents(tenant_id=tenant_id)
 
     @property
     def indexed_chunks(self) -> int:
@@ -106,10 +109,14 @@ class RagService:
         return self._store.count() > 0
 
     # ── 查询接口 ─────────────────────────────────────────
-    def retrieve(self, query: str, top_k: int | None = None) -> list[dict]:
+    def retrieve(
+        self, query: str, top_k: int | None = None, tenant_id: str = "default"
+    ) -> list[dict]:
         """纯检索: 返回 [{content, metadata, distance, similarity}], 不调 LLM"""
         self._require_ready()
-        chunks = self._store.retrieve(query, top_k or self._settings.top_k)
+        chunks = self._store.retrieve(
+            query, top_k or self._settings.top_k, tenant_id=tenant_id
+        )
         return [
             {
                 "content": c.content,
@@ -125,9 +132,10 @@ class RagService:
         query: str,
         top_k: int | None = None,
         history: list[dict] | None = None,
+        tenant_id: str = "default",
     ) -> dict:
         """检索 + 生成一站式问答 (可带会话历史), 返回 {answer, sources}"""
-        chunks = self.retrieve(query, top_k)
+        chunks = self.retrieve(query, top_k, tenant_id=tenant_id)
         answer = self.generate(query, chunks, history=history)
         return {"answer": answer, "sources": self._to_sources(chunks)}
 

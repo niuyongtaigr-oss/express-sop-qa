@@ -86,6 +86,11 @@ class Settings(BaseSettings):
     # 配置后业务接口必须携带 X-API-Key; 不配置则放行并日志告警 (仅本地开发)
     api_key: str | None = None
 
+    # ── 多租户 (P4) ──────────────────────────────────────
+    tenant_mode: bool = False           # 开启多租户: X-API-Key 映射到租户
+    tenants_path: str = "data/tenants.json"  # 租户清单 [{api_key, tenant_id, name}]
+    shared_tenant_id: str = "shared"    # 共享知识库租户 (所有人可检索, 默认 SOP 入库于此)
+
     # ── 派生路径 (相对路径 → 绝对路径) ────────────────────
     @property
     def sop_file(self) -> Path:
@@ -110,6 +115,11 @@ class Settings(BaseSettings):
     @property
     def feedback_file(self) -> Path:
         p = Path(self.feedback_path)
+        return p if p.is_absolute() else PROJECT_ROOT / p
+
+    @property
+    def tenants_file(self) -> Path:
+        p = Path(self.tenants_path)
         return p if p.is_absolute() else PROJECT_ROOT / p
 
 
