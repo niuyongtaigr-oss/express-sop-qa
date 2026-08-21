@@ -167,6 +167,9 @@ curl http://localhost:8000/api/v1/health
 - 数据卷持久化：Chroma 索引 / 评测历史 / 用户反馈（`app-data`）、Ollama 模型（`ollama-models`）
 - 端口 `SOP_QA_APP_PORT` 可改；模型名可用 `SOP_QA_LLM_MODEL` / `SOP_QA_EMBED_MODEL` 覆盖
 - 也可单独构建镜像：`docker build -t express-sop-qa .`
+- 受限网络（容器内无法访问 PyPI）时用离线构建：
+  `pip download -r requirements.txt -d wheels && docker build --build-arg ... `（在宿主机预下载
+  wheels 后 `COPY wheels /wheels` + `pip install --no-index --find-links=/wheels -r requirements.txt`）
 
 ## 设计要点
 

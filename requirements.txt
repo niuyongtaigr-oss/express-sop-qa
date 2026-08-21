@@ -3,7 +3,7 @@
 # 安装: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
 
 fastapi==0.141.1
-uvicorn[standard]==0.52.4
+uvicorn==0.52.4  # 不带 [standard]: 生产镜像不依赖 reload/uvloop 等附加包, 减小拉取面
 pydantic==2.13.4
 pydantic-settings==2.15.0
 langchain-core==1.6.0

@@ -24,3 +24,6 @@ data/feedback.jsonl
 .idea/
 .vscode/
 .DS_Store
+
+# 本地构建临时产物 (wheels/离线构建)
+.build/
