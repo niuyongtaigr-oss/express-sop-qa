@@ -1,0 +1,74 @@
+# 快递 SOP 智能问答系统 — Docker Compose (app + ollama)
+#
+# 首次启动会拉取模型 (qwen2.5:7b + bge-m3, 约 6GB), 请耐心等待:
+#   cp .env.example .env    # 按需修改 (SOP_QA_API_KEY 等)
+#   docker compose up -d
+#   curl http://localhost:8000/api/v1/health
+
+services:
+  # ── LLM 服务 (Ollama, 本地推理) ────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: sop-qa-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 模型预拉取 (一次性; 与 ollama 共享模型卷) ──────────
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: sop-qa-ollama-pull
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama pull ${SOP_QA_LLM_MODEL:-qwen2.5:7b} &&
+        ollama pull ${SOP_QA_EMBED_MODEL:-bge-m3}
+    restart: "no"
+
+  # ── 应用服务 ───────────────────────────────────────────
+  app:
+    build: .
+    container_name: sop-qa-app
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
+    ports:
+      - "${SOP_QA_APP_PORT:-8000}:8000"
+    environment:
+      SOP_QA_OLLAMA_BASE_URL: http://ollama:11434
+      SOP_QA_LLM_MODEL: ${SOP_QA_LLM_MODEL:-qwen2.5:7b}
+      SOP_QA_EMBED_MODEL: ${SOP_QA_EMBED_MODEL:-bge-m3}
+      SOP_QA_API_KEY: ${SOP_QA_API_KEY:-}
+      SOP_QA_LOG_LEVEL: ${SOP_QA_LOG_LEVEL:-INFO}
+      # 可选: 多模型路由 / 限流 / 缓存等, 全部见 .env.example
+      SOP_QA_LLM_PROVIDER: ${SOP_QA_LLM_PROVIDER:-ollama}
+      SOP_QA_RATE_LIMIT_ENABLED: ${SOP_QA_RATE_LIMIT_ENABLED:-false}
+    volumes:
+      # 持久化: Chroma 索引 / 评测历史 / 用户反馈
+      - app-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  ollama-models:
+  app-data:

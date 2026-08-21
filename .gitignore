@@ -16,6 +16,10 @@ venv/
 # 运行时产物（Chroma 持久化索引）
 data/chroma/
 
+# 运行时产物（评测历史 / 用户反馈）
+data/eval_history.jsonl
+data/feedback.jsonl
+
 # IDE / OS
 .idea/
 .vscode/
