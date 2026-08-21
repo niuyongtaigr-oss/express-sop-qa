@@ -49,6 +49,17 @@ class UnauthorizedError(AppError):
     code = "unauthorized"
 
 
+class RateLimitExceeded(AppError):
+    """调用方限流/配额超限 (令牌桶空或日配额尽)"""
+
+    status_code = 429
+    code = "rate_limited"
+
+    def __init__(self, message: str, retry_after_s: float | None = None):
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
+
+
 def _error_payload(code: str, message: str) -> dict:
     return {"error": {"code": code, "message": message, "trace_id": get_trace_id()}}
 
@@ -59,9 +70,14 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
         logger.warning("业务异常: %s %s", exc.code, exc.message)
+        headers = {}
+        # 限流 429 附带 Retry-After (秒), 供客户端退避
+        if isinstance(exc, RateLimitExceeded) and exc.retry_after_s is not None:
+            headers["Retry-After"] = str(int(exc.retry_after_s))
         return JSONResponse(
             status_code=exc.status_code,
             content=_error_payload(exc.code, exc.message),
+            headers=headers,
         )
 
     @app.exception_handler(RequestValidationError)

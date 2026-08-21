@@ -36,6 +36,7 @@ async def lifespan(app: FastAPI):
 
     # 重依赖延迟到启动时加载 (infrastructure 工厂内部懒 import)
     from app.agents.graph import build_chat_graph
+    from app.core.rate_limit import RateLimiter
     from app.infrastructure.embeddings import create_embedding_client
     from app.infrastructure.llm import create_intent_llm, create_llm_client
     from app.infrastructure.vector_store import create_vector_store
@@ -63,7 +64,13 @@ async def lifespan(app: FastAPI):
         max_turns=settings.session_max_turns,
         max_sessions=settings.session_max_sessions,
     )
-    # 后台定期清理过期会话 (asyncio 任务, 关闭时取消)
+    rate_limiter = RateLimiter(
+        enabled=settings.rate_limit_enabled,
+        per_min=settings.rate_limit_per_min,
+        burst=settings.rate_limit_burst,
+        daily_quota=settings.rate_quota_daily,
+    )
+    # 后台定期清理过期会话/限流桶 (asyncio 任务, 关闭时取消)
     stop_sweep = asyncio.Event()
 
     async def _session_sweeper():
@@ -74,6 +81,7 @@ async def lifespan(app: FastAPI):
                 await asyncio.wait_for(stop_sweep.wait(), settings.session_sweep_interval_s)
             except asyncio.TimeoutError:
                 await asyncio.to_thread(sessions.sweep)
+                await asyncio.to_thread(rate_limiter.sweep)
                 SESSION_ACTIVE.set(sessions.count())
 
     sweep_task = asyncio.create_task(_session_sweeper())
@@ -87,6 +95,7 @@ async def lifespan(app: FastAPI):
     app.state.eval_tasks = {}
     app.state.sessions = sessions
     app.state.feedback_store = FeedbackStore(settings.feedback_file)
+    app.state.rate_limiter = rate_limiter
     logger.info("应用就绪")
     try:
         yield

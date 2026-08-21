@@ -12,7 +12,12 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.api.deps import get_eval_service, get_eval_tasks, get_settings
+from app.api.deps import (
+    enforce_rate_limit,
+    get_eval_service,
+    get_eval_tasks,
+    get_settings,
+)
 from app.config import Settings
 from app.core.security import verify_api_key
 from app.schemas.eval import EvalRunResponse, EvalTaskResponse
@@ -20,7 +25,7 @@ from app.services.eval_service import EvalService
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["eval"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(tags=["eval"], dependencies=[Depends(verify_api_key), Depends(enforce_rate_limit)])
 
 
 async def _run_eval_task(

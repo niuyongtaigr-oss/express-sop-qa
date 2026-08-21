@@ -12,7 +12,11 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.api.deps import get_rag_service, get_settings
+from app.api.deps import (
+    enforce_rate_limit,
+    get_rag_service,
+    get_settings,
+)
 from app.config import Settings
 from app.core.exceptions import DegradedError
 from app.core.security import verify_api_key
@@ -29,7 +33,7 @@ from app.services.rag_service import RagService
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["rag"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(tags=["rag"], dependencies=[Depends(verify_api_key), Depends(enforce_rate_limit)])
 
 # doc_id 只允许安全字符 (与向量库 id 生成保持一致)
 _DOC_ID_SAFE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")

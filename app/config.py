@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     cache_ttl_s: float = 300.0      # 缓存过期秒数
     cache_max_entries: int = 512    # 缓存条目上限 (LRU)
 
+    # ── 细粒度限流/配额 (P3-D) ───────────────────────────
+    rate_limit_enabled: bool = False   # 按 Key/IP 限流总开关 (生产开启)
+    rate_limit_per_min: int = 60       # 每 Key 每分钟请求上限
+    rate_limit_burst: int = 20         # 令牌桶突发上限
+    rate_quota_daily: int = 1000       # 每 Key 每日配额
+
     # ── 安全 (可选) ──────────────────────────────────────
     # 配置后业务接口必须携带 X-API-Key; 不配置则放行并日志告警 (仅本地开发)
     api_key: str | None = None

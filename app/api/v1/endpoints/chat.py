@@ -13,14 +13,14 @@ import logging
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import get_chat_service
+from app.api.deps import enforce_rate_limit, get_chat_service
 from app.core.security import verify_api_key
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.chat_service import ChatService
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["chat"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(tags=["chat"], dependencies=[Depends(verify_api_key), Depends(enforce_rate_limit)])
 
 
 @router.post("/chat", response_model=ChatResponse)

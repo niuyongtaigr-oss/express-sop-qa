@@ -9,14 +9,14 @@ import logging
 
 from fastapi import APIRouter, Depends
 
-from app.api.deps import get_feedback_store
+from app.api.deps import enforce_rate_limit, get_feedback_store
 from app.core.security import verify_api_key
 from app.schemas.feedback import FeedbackRequest, FeedbackResponse, FeedbackStats
 from app.services.feedback_service import FeedbackStore
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["feedback"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(tags=["feedback"], dependencies=[Depends(verify_api_key), Depends(enforce_rate_limit)])
 
 
 @router.post("/chat/feedback", response_model=FeedbackResponse)
