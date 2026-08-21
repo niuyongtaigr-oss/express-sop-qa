@@ -15,6 +15,8 @@
 
 import json
 import logging
+import threading
+import time
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -67,14 +69,74 @@ _JUDGE_SYSTEM = (
 )
 
 
+class EvalHistory:
+    """评测历史 — JSONL 持久化 (回归对比: 与最近一次同配置评测做 diff)
+
+    线程安全; 只保留最近 max_entries 条; 进程重启不丢 (落盘)。
+    """
+
+    def __init__(self, path: Path, max_entries: int = 50):
+        self._path = path
+        self._max = max_entries
+        self._lock = threading.Lock()
+        self._entries: list[dict] = self._load()
+
+    def _load(self) -> list[dict]:
+        if not self._path.exists():
+            return []
+        entries: list[dict] = []
+        try:
+            lines = self._path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        for line in lines[-self._max * 2:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return entries[-self._max:]
+
+    def append(self, entry: dict) -> None:
+        with self._lock:
+            self._entries.append(entry)
+            self._entries = self._entries[-self._max:]
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def latest_before(self, ts: float, judge: bool | None = None) -> dict | None:
+        """最近一次 ts 之前的评测摘要 (可限定 judge 开关一致)"""
+        with self._lock:
+            for e in reversed(self._entries):
+                if e.get("ts", 0) < ts and (judge is None or e.get("judge") == judge):
+                    return e
+        return None
+
+    def count(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+
 class EvalService:
     """检索命中率 + 答案质量评测"""
 
-    def __init__(self, rag_service: RagService, llm: LLMClient, settings: Settings):
+    def __init__(
+        self,
+        rag_service: RagService,
+        llm: LLMClient,
+        settings: Settings,
+        history_path: Path | None = None,
+        record_history: bool = True,
+    ):
         self._rag = rag_service
         self._llm = llm
         self._settings = settings
         self._cases = self._load_cases()
+        self._history = EvalHistory(history_path or settings.eval_history_file)
+        self._record_history = record_history
 
     # ── 评测集 ───────────────────────────────────────────
     def _load_cases(self) -> list[dict]:
@@ -98,6 +160,9 @@ class EvalService:
         返回 {hit_rate, faithfulness_avg, completeness_avg, top_k, judge, config, details}
         """
         use_judge = self._settings.eval_judge if judge is None else judge
+        now = time.time()
+        # 回归对比基准: 本次之前最近一次同 judge 设置的评测
+        baseline = self._history.latest_before(now, judge=use_judge)
         details = []
         hits = 0
         judged = 0
@@ -147,12 +212,49 @@ class EvalService:
                 "chunk_size": self._settings.chunk_size,
                 "kb_chunks": self._rag.indexed_chunks,
             },
+            "compare": self._diff_vs(baseline, hit_rate, judged, f_sum, c_sum),
             "details": details,
         }
+        if self._record_history:
+            self._history.append({
+                "ts": now,
+                "hit_rate": result["hit_rate"],
+                "faithfulness_avg": result["faithfulness_avg"],
+                "completeness_avg": result["completeness_avg"],
+                "judged_cases": judged,
+                "top_k": top_k,
+                "judge": use_judge,
+                "config": result["config"],
+            })
         logger.info("eval_done hit_rate=%.4f faithfulness=%s completeness=%s cases=%d judged=%d",
                     hit_rate, result["faithfulness_avg"], result["completeness_avg"],
                     n, judged)
         return result
+
+    # ── 内部: 回归对比 ───────────────────────────────────
+    @staticmethod
+    def _diff_vs(
+        baseline: dict | None,
+        hit_rate: float,
+        judged: int,
+        f_sum: float,
+        c_sum: float,
+    ) -> dict | None:
+        """与基准评测的差值 (delta), 无基准返回 None"""
+        if not baseline:
+            return None
+        diff = {
+            "vs_ts": baseline.get("ts"),
+            "hit_rate_delta": round(hit_rate - baseline.get("hit_rate", 0.0), 4),
+        }
+        if judged:
+            f_avg = round(f_sum / judged, 4)
+            c_avg = round(c_sum / judged, 4)
+            if baseline.get("faithfulness_avg") is not None:
+                diff["faithfulness_delta"] = round(f_avg - baseline["faithfulness_avg"], 4)
+            if baseline.get("completeness_avg") is not None:
+                diff["completeness_delta"] = round(c_avg - baseline["completeness_avg"], 4)
+        return diff
 
     # ── 内部: LLM 评审 ───────────────────────────────────
     def _judge(

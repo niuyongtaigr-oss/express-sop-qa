@@ -58,7 +58,7 @@ class JudgeLLM:
 
 def test_hit_rate_and_judge_scores():
     rag, llm = StubRag(), JudgeLLM()
-    result = EvalService(rag, llm, make_settings()).run(top_k=3)
+    result = EvalService(rag, llm, make_settings(), record_history=False).run(top_k=3)
     assert result["top_k"] == 3
     assert result["judge"] is True
     assert result["judged_cases"] == BUILTIN_N
@@ -77,7 +77,7 @@ def test_hit_rate_and_judge_scores():
 
 def test_no_judge_skips_generation():
     rag, llm = StubRag(), JudgeLLM()
-    result = EvalService(rag, llm, make_settings()).run(top_k=3, judge=False)
+    result = EvalService(rag, llm, make_settings(), record_history=False).run(top_k=3, judge=False)
     assert result["judge"] is False
     assert result["judged_cases"] == 0
     assert result["faithfulness_avg"] is None
@@ -102,7 +102,7 @@ def test_judge_error_does_not_kill_run():
             raise RuntimeError("judge down")
 
     rag, llm = StubRag(), BrokenJudge()
-    result = EvalService(rag, llm, make_settings()).run(top_k=3)
+    result = EvalService(rag, llm, make_settings(), record_history=False).run(top_k=3)
     assert result["judged_cases"] == 0
     assert result["faithfulness_avg"] is None
     assert any("judge_error" in (d.get("reason") or "") for d in result["details"])
@@ -119,7 +119,7 @@ def test_cases_from_file(tmp_path):
     f = tmp_path / "cases.json"
     f.write_text(json.dumps(cases, ensure_ascii=False), encoding="utf-8")
     rag, llm = StubRag(), JudgeLLM()
-    svc = EvalService(rag, llm, make_settings(eval_cases_path=str(f)))
+    svc = EvalService(rag, llm, make_settings(eval_cases_path=str(f)), record_history=False)
     result = svc.run(top_k=3, judge=False)
     assert len(result["details"]) == 1
     assert result["details"][0]["case_id"] == "custom-1"
@@ -128,6 +128,6 @@ def test_cases_from_file(tmp_path):
 def test_cases_fallback_when_file_missing(tmp_path):
     missing = tmp_path / "nope.json"
     rag, llm = StubRag(), JudgeLLM()
-    svc = EvalService(rag, llm, make_settings(eval_cases_path=str(missing)))
+    svc = EvalService(rag, llm, make_settings(eval_cases_path=str(missing)), record_history=False)
     result = svc.run(top_k=3, judge=False)
     assert len(result["details"]) == BUILTIN_N

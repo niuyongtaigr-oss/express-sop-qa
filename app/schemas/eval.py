@@ -36,5 +36,6 @@ class EvalTaskResponse(BaseModel):
     top_k: int | None = None
     judge: bool | None = None
     config: dict | None = None
+    compare: dict | None = None  # 回归对比: {vs_ts, hit_rate_delta, ...}
     details: list[EvalCaseDetail] | None = None
     detail: str | None = None  # status=error 时的错误说明

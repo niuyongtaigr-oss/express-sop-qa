@@ -7,10 +7,13 @@
   python3 scripts/run_eval.py --no-judge     # 只测检索命中率 (快)
   python3 scripts/run_eval.py --force-reingest   # 强制重建索引后评测
   python3 scripts/run_eval.py --top-k 5
+  python3 scripts/run_eval.py --scan-top-k "1,3,5"        # top_k 参数扫描 (P2-B)
+  python3 scripts/run_eval.py --compare-mode              # hybrid vs vector 对比 (P2-B)
 """
 
 import argparse
 import sys
+import tempfile
 from pathlib import Path
 
 # 脚本直接运行时 sys.path[0] 是 scripts/, 插入项目根目录使 app 包可导入
@@ -21,9 +24,32 @@ from app.config import get_settings
 from app.core.logging import setup_logging
 from app.infrastructure.embeddings import create_embedding_client
 from app.infrastructure.llm import create_llm_client
-from app.infrastructure.vector_store import create_vector_store
+from app.infrastructure.vector_store import ChromaVectorStore, create_vector_store
 from app.services.eval_service import EvalService
 from app.services.rag_service import RagService
+
+
+def _print_details(result: dict) -> None:
+    for d in result["details"]:
+        mark = "✅" if d["hit"] else "❌"
+        extra = ""
+        if d.get("faithfulness") is not None:
+            extra = (f" | 忠实={d['faithfulness']:.2f} 完整={d['completeness']:.2f}"
+                     f" | {d.get('reason', '')[:40]}")
+        print(f"  {mark} [{d['expect']}] {d['question']} (sim={d['top_similarity']}){extra}")
+
+
+def _print_summary(result: dict) -> None:
+    print(f"🎯 检索命中率: {result['hit_rate']:.0%} (top_k={result['top_k']})")
+    if result.get("faithfulness_avg") is not None:
+        print(f"⭐ 答案质量: 忠实性={result['faithfulness_avg']:.2f} "
+              f"完整性={result['completeness_avg']:.2f} (judged={result['judged_cases']})")
+    comp = result.get("compare")
+    if comp:
+        print(f"📈 对比上次: hit_rate {comp['hit_rate_delta']:+.2f}"
+              + (f" | 忠实 {comp.get('faithfulness_delta', 0):+.2f}"
+                 f" | 完整 {comp.get('completeness_delta', 0):+.2f}"
+                 if comp.get("faithfulness_delta") is not None else ""))
 
 
 def main() -> None:
@@ -31,6 +57,10 @@ def main() -> None:
     parser.add_argument("--force-reingest", action="store_true", help="强制重建索引")
     parser.add_argument("--top-k", type=int, default=None, help="检索 Top-K (默认走配置)")
     parser.add_argument("--no-judge", action="store_true", help="跳过 LLM 答案评分, 只测检索")
+    parser.add_argument("--scan-top-k", type=str, default=None,
+                        help='top_k 参数扫描: 逗号分隔, 如 "1,3,5" (不调 LLM)')
+    parser.add_argument("--compare-mode", action="store_true",
+                        help="对比 hybrid vs vector 检索模式 (临时索引, 不污染正式库)")
     args = parser.parse_args()
 
     settings = get_settings()
@@ -38,6 +68,14 @@ def main() -> None:
 
     embeddings = create_embedding_client(settings)
     llm = create_llm_client(settings)
+
+    if args.compare_mode:
+        _compare_modes(settings, embeddings, llm, args.top_k)
+        return
+    if args.scan_top_k:
+        _scan_top_k(settings, embeddings, llm, args.scan_top_k)
+        return
+
     vector_store = create_vector_store(settings, embeddings)
     rag_service = RagService(vector_store, llm, settings)
 
@@ -50,18 +88,48 @@ def main() -> None:
         top_k=args.top_k or settings.top_k,
         judge=not args.no_judge,
     )
-    for d in result["details"]:
-        mark = "✅" if d["hit"] else "❌"
-        extra = ""
-        if d.get("faithfulness") is not None:
-            extra = (f" | 忠实={d['faithfulness']:.2f} 完整={d['completeness']:.2f}"
-                     f" | {d.get('reason', '')[:40]}")
-        print(f"  {mark} [{d['expect']}] {d['question']} (sim={d['top_similarity']}){extra}")
+    _print_details(result)
+    print()
+    _print_summary(result)
 
-    print(f"\n🎯 检索命中率: {result['hit_rate']:.0%} (top_k={result['top_k']})")
-    if result.get("faithfulness_avg") is not None:
-        print(f"⭐ 答案质量: 忠实性={result['faithfulness_avg']:.2f} "
-              f"完整性={result['completeness_avg']:.2f} (judged={result['judged_cases']})")
+
+def _scan_top_k(settings, embeddings, llm, csv: str) -> None:
+    """top_k 参数扫描: 不调 LLM (纯检索), 不写评测历史"""
+    vector_store = create_vector_store(settings, embeddings)
+    rag_service = RagService(vector_store, llm, settings)
+    n, _ = rag_service.ingest(force=False)
+    print(f"📚 索引 {n} chunks, top_k 扫描开始...")
+    svc = EvalService(rag_service, llm, settings, record_history=False)
+    print(f"  {'top_k':<6}{'hit_rate':<10}{'avg_sim':<10}")
+    for k in [int(x) for x in csv.split(",") if x.strip()]:
+        result = svc.run(top_k=k, judge=False)
+        sims = [d["top_similarity"] for d in result["details"]]
+        avg_sim = sum(sims) / len(sims) if sims else 0
+        print(f"  {k:<6}{result['hit_rate']:<10.2f}{avg_sim:<10.3f}")
+
+
+def _compare_modes(settings, embeddings, llm, top_k) -> None:
+    """hybrid vs vector 检索模式对比: 各自用独立临时索引, 不污染正式库"""
+    print("🆚 检索模式对比 (hybrid vs vector, 临时索引)...")
+    top_k = top_k or settings.top_k
+    for mode in ("hybrid", "vector"):
+        with tempfile.TemporaryDirectory(prefix="sopqa-cmp-") as d:
+            store = ChromaVectorStore(
+                persist_dir=d,
+                collection_name=settings.collection_name,
+                embeddings=embeddings,
+                chunk_size=settings.chunk_size,
+                chunk_overlap=settings.chunk_overlap,
+                retrieval_mode=mode,
+            )
+            rag = RagService(store, llm, settings)
+            n, _ = rag.ingest(force=True)
+            result = EvalService(rag, llm, settings, record_history=False).run(
+                top_k=top_k, judge=False
+            )
+            misses = [d["question"] for d in result["details"] if not d["hit"]]
+            print(f"  {mode:<8} chunks={n:<3} hit_rate={result['hit_rate']:.2f}"
+                  f"{'  未命中: ' + '; '.join(misses) if misses else ''}")
 
 
 if __name__ == "__main__":
