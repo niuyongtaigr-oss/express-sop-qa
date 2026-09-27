@@ -9,9 +9,11 @@
   python3 scripts/run_eval.py --top-k 5
   python3 scripts/run_eval.py --scan-top-k "1,3,5"        # top_k 参数扫描 (P2-B)
   python3 scripts/run_eval.py --compare-mode              # hybrid / vector / bm25 对照 (P2-B)
+  python3 scripts/run_eval.py --compare-mode --rerank     # 同上, 但启用 LLM 精排
 """
 
 import argparse
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -75,6 +77,8 @@ def main() -> None:
                         help='top_k 参数扫描: 逗号分隔, 如 "1,3,5" (不调 LLM)')
     parser.add_argument("--compare-mode", action="store_true",
                         help="对照 hybrid / vector / bm25 检索模式 (临时索引, 不污染正式库)")
+    parser.add_argument("--rerank", action="store_true",
+                        help="启用 LLM 精排 (配合 --compare-mode 可对照重排增益)")
     args = parser.parse_args()
 
     settings = get_settings()
@@ -84,7 +88,7 @@ def main() -> None:
     llm = create_llm_client(settings)
 
     if args.compare_mode:
-        _compare_modes(settings, embeddings, llm, args.top_k)
+        _compare_modes(settings, embeddings, llm, args.top_k, rerank=args.rerank)
         return
     if args.scan_top_k:
         _scan_top_k(settings, embeddings, llm, args.scan_top_k)
@@ -122,15 +126,50 @@ def _scan_top_k(settings, embeddings, llm, csv: str) -> None:
         print(f"  {k:<6}{result['hit_rate']:<10.2f}{avg_sim:<10.3f}")
 
 
-def _compare_modes(settings, embeddings, llm, top_k) -> None:
+RECALL_KS = (1, 3, 5, 10)
+
+
+def _recall_at_k(rag, cases: list[dict]) -> dict[str, float]:
+    """对每个 k 统计「前 k 条里含期望关键词」的比例 (Recall@k)。
+
+    比单一 hit_rate 信息量大得多: hit_rate 只在某一个 k 上取一个点, 看不出
+    两种检索方式「谁头部更准、谁覆盖更全」。重排的价值恰恰体现在低 k 上,
+    所以必须分开看 R@1 / R@3。
+    """
+    ks = [k for k in RECALL_KS]
+    ranks: list[int] = []
+    for case in cases:
+        chunks = rag.retrieve(case["question"], top_k=max(ks), tenant_id="shared")
+        keywords = case["expect_keywords"]
+        rank = next(
+            (i for i, c in enumerate(chunks, 1) if any(k in c["content"] for k in keywords)),
+            0,
+        )
+        ranks.append(rank)
+    n = len(ranks) or 1
+    return {f"R@{k}": sum(1 for r in ranks if 0 < r <= k) / n for k in ks}
+
+
+def _compare_modes(settings, embeddings, llm, top_k, rerank: bool = False) -> None:
     """检索模式对照: hybrid / vector / bm25, 各自用独立临时索引, 不污染正式库
 
     三种都跑才能量化「混合检索的增益来自哪里」—— 只有 hybrid 与 vector 两组
     数字时, 无法判断 BM25 到底有没有起作用。
+
+    rerank=True 时同时启用精排, 可直接对照「重排把低 k 精度抬了多少」。
     """
-    print("🆚 检索模式对比 (hybrid / vector / bm25, 临时索引)...")
-    top_k = top_k or settings.top_k
-    hits: dict[str, float] = {}
+    mode_settings = settings.model_copy(update={"rerank_enabled": rerank})
+    tag = " + 精排(LLM rerank)" if rerank else " (仅粗排)"
+    print(f"🆚 检索模式对比{tag} — 临时索引, 语料为 data/corpus/\n")
+
+    cases = [
+        c for c in json.loads(
+            settings.eval_cases_file.read_text(encoding="utf-8")
+        ) if not c.get("expect_refusal")
+    ]
+    header = f"  {'mode':<8}{'chunks':<9}" + "".join(f"{'R@'+str(k):<8}" for k in RECALL_KS)
+    print(header)
+    print("  " + "-" * (len(header) - 2))
     for mode in ("hybrid", "vector", "bm25"):
         with tempfile.TemporaryDirectory(prefix="sopqa-cmp-") as d:
             store = ChromaVectorStore(
@@ -141,18 +180,12 @@ def _compare_modes(settings, embeddings, llm, top_k) -> None:
                 chunk_overlap=settings.chunk_overlap,
                 retrieval_mode=mode,
             )
-            rag = RagService(store, llm, settings)
+            rag = RagService(store, llm, mode_settings)
             n, _ = rag.ingest(force=True)
-            result = EvalService(rag, llm, settings, record_history=False).run(
-                top_k=top_k, judge=False
-            )
-            # 只统计检索用例的未命中 (拒答用例无 hit 概念)
-            misses = [
-                d["question"] for d in result["details"]
-                if d.get("kind") == "retrieval" and not d["hit"]
-            ]
-            print(f"  {mode:<8} chunks={n:<3} hit_rate={result['hit_rate']:.2f}"
-                  f"{'  未命中: ' + '; '.join(misses) if misses else ''}")
+            recall = _recall_at_k(rag, cases)
+            print(f"  {mode:<8}{n:<9}" + "".join(
+                f"{recall[f'R@{k}']:<8.2f}" for k in RECALL_KS
+            ))
 
 
 if __name__ == "__main__":

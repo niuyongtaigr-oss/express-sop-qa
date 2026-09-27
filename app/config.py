@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     top_k: int = 3
     retrieval_mode: str = "hybrid"        # hybrid=向量+BM25 融合(RRF) / vector=纯向量 / bm25=纯BM25
 
+    # ── 重排 (RRF 融合之后的精排) ────────────────────────
+    # 默认关闭: 每次查询会多一次 LLM 调用。实测增益见 README「检索效果实测」。
+    rerank_enabled: bool = False
+    rerank_candidates: int = 12           # 参与重排的候选数 (粗排多取, 精排后截到 top_k)
+    rerank_max_chars: int = 300           # 每个候选送入重排的字符上限 (控制上下文长度)
+
     # ── 文档解析 (上传入知识库) ──────────────────────────
     doc_max_bytes: int = 20 * 1024 * 1024  # 单文件体积上限 (字节), 默认 20 MB
     doc_max_chars: int = 2_000_000         # 单文档抽取字符上限 (超出截断)

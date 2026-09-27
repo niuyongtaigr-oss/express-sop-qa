@@ -21,6 +21,7 @@ from app.infrastructure.document_loader import (
     create_document_loader,
 )
 from app.infrastructure.llm import LLMClient
+from app.infrastructure.reranker import Reranker, create_reranker
 from app.infrastructure.vector_store import RetrievedChunk, VectorStore
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,7 @@ class RagService:
         llm: LLMClient,
         settings: Settings,
         document_loader: DocumentLoader | None = None,
+        reranker: Reranker | None = None,
     ):
         self._store = vector_store
         self._llm = llm
@@ -80,6 +82,8 @@ class RagService:
         self._version = 0  # 知识库版本: 任何写入变更 +1 (答案缓存失效用)
         # 文档解析器 (PDF/Word/Excel/文本): 缺省按配置创建; 显式传入便于测试替换
         self._loader = document_loader or create_document_loader(settings)
+        # 重排器 (RRF 融合之后的精排): 关闭时为 NoopReranker, 调用路径保持一致
+        self._reranker = reranker or create_reranker(settings, llm)
 
     @property
     def kb_version(self) -> int:
@@ -209,11 +213,20 @@ class RagService:
     def retrieve(
         self, query: str, top_k: int | None = None, tenant_id: str = "default"
     ) -> list[dict]:
-        """纯检索: 返回 [{content, metadata, distance, similarity}], 不调 LLM"""
+        """纯检索: 粗排 (向量/BM25/RRF) → 可选精排 (重排) → top_k
+
+        返回 [{content, metadata, distance, similarity}]。
+
+        重排开启时会先多取候选 (rerank_candidates) 再精排截断 —— 重排的价值
+        正在于「从更大的候选池里挑出真正相关的少数几条」, 只取 top_k 个候选
+        再重排是没有意义的。重排本身需要 LLM, 因此该路径不再是"不调 LLM"。
+        """
         self._require_ready()
-        chunks = self._store.retrieve(
-            query, top_k or self._settings.top_k, tenant_id=tenant_id
-        )
+        k = top_k or self._settings.top_k
+        fetch_k = max(self._settings.rerank_candidates, k) if self._settings.rerank_enabled else k
+        chunks = self._store.retrieve(query, top_k=fetch_k, tenant_id=tenant_id)
+        if self._settings.rerank_enabled:
+            chunks = self._reranker.rerank(query, chunks, k)
         return [
             {
                 "content": c.content,
