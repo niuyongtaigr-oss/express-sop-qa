@@ -46,7 +46,7 @@
 | `app/config.py` | pydantic-settings 集中配置，环境变量前缀 `SOP_QA_`，仓库零密钥 |
 | `app/core/` | 横切关注点：结构化日志+trace_id、统一异常、请求日志中间件、API Key 鉴权 |
 | `app/schemas/` | Pydantic DTO，按资源分文件（chat/rag/eval/common） |
-| `app/infrastructure/` | 外部系统适配层：LLM / Embedding / 向量库，Protocol 抽象 + 工厂 |
+| `app/infrastructure/` | 外部系统适配层：LLM / Embedding / 向量库 / 文档解析，Protocol 抽象 + 工厂 |
 | `app/services/` | 业务逻辑层：RAG 服务、问答编排（限流/超时降级）、检索评测 |
 | `app/agents/` | LangGraph 编排：ChatState、节点工厂、图装配（依赖注入，无全局单例） |
 | `app/api/` | HTTP 层：依赖注入 + 版本化路由 `/api/v1` |
@@ -68,6 +68,8 @@
 | GET | `/api/v1/rag/docs` | 知识库文档清单（doc_id / title / chunk 数） | 是* |
 | POST | `/api/v1/rag/docs` | 增量导入/覆盖文档（upsert：同 doc_id 旧 chunk 先删后加） | 是* |
 | DELETE | `/api/v1/rag/docs/{doc_id}` | 删除文档及其全部 chunk | 是* |
+| GET | `/api/v1/rag/docs/formats` | 支持的文档格式（前端设置上传 accept 用） | 是* |
+| POST | `/api/v1/rag/docs/upload` | **上传文件**（PDF/Word/Excel/CSV/文本）解析并入库 | 是* |
 | POST | `/api/v1/eval/run` | 提交评测（检索命中率 + LLM-as-Judge 答案质量 + 拒答准确率），后台任务返回 task_id | 是* |
 | GET | `/api/v1/eval/tasks/{task_id}` | 轮询评测结果（hit_rate/拒答准确率/忠实性/完整性 + 回归对比 compare） | 是* |
 
@@ -94,6 +96,13 @@ curl -X POST http://127.0.0.1:8000/api/v1/rag/docs \
   -H 'Content-Type: application/json' \
   -d '{"doc_id": "claim-rules", "title": "理赔细则", "content": "理赔时限..."}'
 curl -X DELETE http://127.0.0.1:8000/api/v1/rag/docs/claim-rules
+
+# 上传文件入库 (P1.7) — PDF / Word / Excel / CSV / 文本
+curl -X GET  http://127.0.0.1:8000/api/v1/rag/docs/formats   # 支持的扩展名
+curl -X POST http://127.0.0.1:8000/api/v1/rag/docs/upload \
+  -F 'file=@理赔制度.pdf' -F 'title=理赔制度'
+# → {"doc_id":"...","title":"理赔制度","indexed_chunks":12,
+#    "source":{"ext":".pdf","pages":8,"pages_with_text":8,"chars":6321,"truncated":false}}
 
 # 评测（异步任务）
 curl -X POST http://127.0.0.1:8000/api/v1/eval/run        # → {"task_id": "...", "status": "pending"}
@@ -187,6 +196,17 @@ curl http://localhost:8000/api/v1/health
   精确术语/编号召回更稳。
 - **P1.6 多文档知识库**：`/rag/docs` 增量导入/覆盖/删除，chunk 元数据带 doc_id/title，
   替代单文件全量重建。
+- **P1.7 文档解析层**：`/rag/docs/upload` 直接收**原始文件**——PDF / Word / Excel /
+  CSV / 文本，解析 → 清洗 → 切块入库。企业知识库的原始资料是 PDF 规范、Word 制度、
+  Excel 台账，没有这一层，客户的资料根本进不来。
+  - 中文编码自动识别（BOM → utf-8 → gb18030）：国内资料 GBK 极常见，按 utf-8 硬读
+    会**静默产出乱码**，是最隐蔽的一类脏数据。
+  - 文本清洗：去控制字符、合并被字距误判拆开的汉字（`理 赔 流 程` → `理赔流程`）、
+    压缩空白。真实 PDF 抽出的文本几乎都需要过一遍。
+  - 表格渲染成「表头: 值」的行文本，比 markdown 表更适合 RAG——切块后列名上下文不丢。
+  - 扫描件（无文本层 PDF）**明确报错**提示需要 OCR，而不是静默产出空文档。
+  - 体积 / 字符数上限兜底，中文文件名走哈希 doc_id 避免撞 id。
+  - 各解析库懒加载，缺失时给出可执行的安装提示。
 - **P2-A LLM-as-Judge**：评测集 `data/eval_cases.json`（期望关键词 + 要求要点）；
   答案质量按忠实性/完整性 LLM 结构化评分，HTTP 后台任务 + CLI 双入口。
 - **P2-A′ 拒答测试**：评测集支持 `expect_refusal: true` 用例——知识库中确实没有答案的

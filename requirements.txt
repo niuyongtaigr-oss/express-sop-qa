@@ -14,3 +14,10 @@ chromadb==1.5.9
 langchain-text-splitters==1.1.2
 httpx==0.28.1
 prometheus-client==0.26.0
+
+# ── 文档解析层 (上传 PDF/Word/Excel 入库所需) ─────────────
+# 三者均为按需懒加载: 只上传纯文本时不触发, 但镜像里预装以保证开箱可用
+pypdf==6.19.0          # PDF 文本抽取
+python-docx==1.2.0     # Word (.docx) 段落与表格
+openpyxl==3.1.5        # Excel (.xlsx/.xlsm)
+python-multipart==0.0.32  # FastAPI 文件上传 (multipart/form-data) 解析

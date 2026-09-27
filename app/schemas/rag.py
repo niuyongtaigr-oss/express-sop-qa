@@ -51,6 +51,25 @@ class DocAddResponse(BaseModel):
     indexed_chunks: int
 
 
+class DocUploadResponse(BaseModel):
+    """文件上传解析入库响应"""
+
+    doc_id: str
+    title: str
+    indexed_chunks: int
+    source: dict = Field(
+        default_factory=dict,
+        description="解析溯源: filename / ext / pages / sheets / encoding / "
+                    "chars / chars_raw / truncated 等",
+    )
+
+
+class DocFormatsResponse(BaseModel):
+    """当前支持的文档格式 (前端上传前限制 accept, 并由服务端如实告知)"""
+
+    extensions: list[str]
+
+
 class DocDeleteResponse(BaseModel):
     doc_id: str
     removed_chunks: int

@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     top_k: int = 3
     retrieval_mode: str = "hybrid"        # hybrid=向量+BM25 融合(RRF) / vector=纯向量
 
+    # ── 文档解析 (上传入知识库) ──────────────────────────
+    doc_max_bytes: int = 20 * 1024 * 1024  # 单文件体积上限 (字节), 默认 20 MB
+    doc_max_chars: int = 2_000_000         # 单文档抽取字符上限 (超出截断)
+
     # ── 多轮会话 (记忆) ──────────────────────────────────
     session_ttl_s: int = 1800             # 会话空闲过期时间 (秒)
     session_max_turns: int = 10           # 单会话保留的最大轮数 (超出丢最旧)

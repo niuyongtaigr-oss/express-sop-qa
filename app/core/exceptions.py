@@ -35,6 +35,17 @@ class KnowledgeBaseNotReady(AppError):
     code = "knowledge_base_not_ready"
 
 
+class DocumentParseError(AppError):
+    """文档解析失败 (格式不支持 / 文件损坏 / 依赖缺失 / 内容为空 / 超出上限)
+
+    由文档解析层抛出, 经全局异常处理器转成 400 —— 让调用方看到具体原因
+    (例如「可能是扫描件, 需要 OCR」), 而不是笼统的 500。
+    """
+
+    status_code = 400
+    code = "document_parse_failed"
+
+
 class DegradedError(AppError):
     """服务降级 (超时/上游不可用), 由上层转成友好响应"""
 
