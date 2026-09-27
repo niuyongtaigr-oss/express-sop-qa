@@ -68,8 +68,8 @@
 | GET | `/api/v1/rag/docs` | 知识库文档清单（doc_id / title / chunk 数） | 是* |
 | POST | `/api/v1/rag/docs` | 增量导入/覆盖文档（upsert：同 doc_id 旧 chunk 先删后加） | 是* |
 | DELETE | `/api/v1/rag/docs/{doc_id}` | 删除文档及其全部 chunk | 是* |
-| POST | `/api/v1/eval/run` | 提交评测（检索命中率 + LLM-as-Judge 答案质量），后台任务返回 task_id | 是* |
-| GET | `/api/v1/eval/tasks/{task_id}` | 轮询评测结果（hit_rate/忠实性/完整性 + 回归对比 compare） | 是* |
+| POST | `/api/v1/eval/run` | 提交评测（检索命中率 + LLM-as-Judge 答案质量 + 拒答准确率），后台任务返回 task_id | 是* |
+| GET | `/api/v1/eval/tasks/{task_id}` | 轮询评测结果（hit_rate/拒答准确率/忠实性/完整性 + 回归对比 compare） | 是* |
 
 \* 配置了 `SOP_QA_API_KEY` 时需携带 `X-API-Key` 请求头；未配置则放行并日志告警（仅本地开发）。
 启用 `SOP_QA_RATE_LIMIT_ENABLED=true` 后，上述业务接口额外按 `X-API-Key`/IP 限流（429 + `Retry-After`）。
@@ -189,8 +189,11 @@ curl http://localhost:8000/api/v1/health
   替代单文件全量重建。
 - **P2-A LLM-as-Judge**：评测集 `data/eval_cases.json`（期望关键词 + 要求要点）；
   答案质量按忠实性/完整性 LLM 结构化评分，HTTP 后台任务 + CLI 双入口。
+- **P2-A′ 拒答测试**：评测集支持 `expect_refusal: true` 用例——知识库中确实没有答案的
+  问题，系统应如实拒答而非编造。单独统计 `refusal_accuracy`，守住企业知识库的底线
+  （宁可说「不知道」，不能一本正经地胡说）。该类用例不参与 `hit_rate`，因其属生成侧指标。
 - **P2-B 评测回归**：评测历史 JSONL 落盘，`/eval/tasks` 返回与上次评测的 delta
-  （hit_rate/忠实性/完整性）；CLI 支持 `--scan-top-k` / `--compare-mode` 参数扫描。
+  （hit_rate/拒答准确率/忠实性/完整性）；CLI 支持 `--scan-top-k` / `--compare-mode` 参数扫描。
 - **P2-C 反馈闭环**：`/chat/feedback` 落盘 JSONL，负面反馈（≤2 分）结构化告警；
   `stats` 提供均分/负面率/低分问题（评测集扩充素材）。
 - **P3-A 答案缓存**：无会话相同问题短 TTL 缓存，key 含知识库版本号（变更自动失效），

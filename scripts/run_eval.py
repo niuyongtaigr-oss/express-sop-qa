@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""命令行评测入口 — 不启动 HTTP 服务, 直接跑评测 (检索命中率 + LLM-as-Judge)
+"""命令行评测入口 — 不启动 HTTP 服务, 直接跑评测 (检索命中率 + 答案质量 + 拒答准确率)
 
 运行方式 (从项目根目录, 需 Ollama 运行中):
   python3 scripts/run_eval.py                # 完整评测 (含 LLM 评分, 较慢)
@@ -31,6 +31,14 @@ from app.services.rag_service import RagService
 
 def _print_details(result: dict) -> None:
     for d in result["details"]:
+        # 拒答用例无 hit 概念, 只判「是否如实拒答」
+        if d.get("kind") == "refusal":
+            refused = d.get("refused")
+            mark = {True: "🚫", False: "⚠️"}.get(refused, "•")
+            note = {True: "如实拒答", False: "未拒答(编造)", None: "未评估"}[refused]
+            print(f"  {mark} [REFUSE] {d['question']} "
+                  f"(sim={d['top_similarity']}) | {note}")
+            continue
         mark = "✅" if d["hit"] else "❌"
         extra = ""
         if d.get("faithfulness") is not None:
@@ -41,12 +49,18 @@ def _print_details(result: dict) -> None:
 
 def _print_summary(result: dict) -> None:
     print(f"🎯 检索命中率: {result['hit_rate']:.0%} (top_k={result['top_k']})")
+    if result.get("refusal_accuracy") is not None:
+        print(f"🚫 拒答准确率: {result['refusal_accuracy']:.0%} "
+              f"({result.get('refusal_checked', 0)}/{result.get('refusal_total', 0)} 条)"
+              " — 知识库无答案时应如实拒答, 而非编造")
     if result.get("faithfulness_avg") is not None:
         print(f"⭐ 答案质量: 忠实性={result['faithfulness_avg']:.2f} "
               f"完整性={result['completeness_avg']:.2f} (judged={result['judged_cases']})")
     comp = result.get("compare")
     if comp:
         print(f"📈 对比上次: hit_rate {comp['hit_rate_delta']:+.2f}"
+              + (f" | 拒答 {comp['refusal_accuracy_delta']:+.2f}"
+                 if comp.get("refusal_accuracy_delta") is not None else "")
               + (f" | 忠实 {comp.get('faithfulness_delta', 0):+.2f}"
                  f" | 完整 {comp.get('completeness_delta', 0):+.2f}"
                  if comp.get("faithfulness_delta") is not None else ""))
@@ -127,7 +141,11 @@ def _compare_modes(settings, embeddings, llm, top_k) -> None:
             result = EvalService(rag, llm, settings, record_history=False).run(
                 top_k=top_k, judge=False
             )
-            misses = [d["question"] for d in result["details"] if not d["hit"]]
+            # 只统计检索用例的未命中 (拒答用例无 hit 概念)
+            misses = [
+                d["question"] for d in result["details"]
+                if d.get("kind") == "retrieval" and not d["hit"]
+            ]
             print(f"  {mode:<8} chunks={n:<3} hit_rate={result['hit_rate']:.2f}"
                   f"{'  未命中: ' + '; '.join(misses) if misses else ''}")
 

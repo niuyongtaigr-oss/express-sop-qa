@@ -1,11 +1,19 @@
-"""检索与回答质量评测服务 — hit_rate + LLM-as-Judge (P2)
+"""检索与回答质量评测服务 — hit_rate + LLM-as-Judge + 拒答测试 (P2)
 
-两个维度:
+三个维度:
   1. 检索命中率 (hit_rate): 检索链路质量 — Top-K 结果是否包含期望关键词 (不调 LLM)
   2. 答案质量 (LLM-as-Judge): 生成链路质量 — 对每个用例实际生成回答, 由评审 LLM
      按两个维度结构化打分 (0-1):
        - faithfulness  忠实性: 回答是否都能从参考文档中找到依据 (未编造)
        - completeness  完整性: 回答是否覆盖 required_points 要求要点
+  3. 拒答准确率 (refusal_accuracy): 知识库中确实没有答案的问题, 系统应如实拒答
+     而非编造。企业知识库最怕「一本正经地胡说」, 故单独设一类用例守住这条底线。
+
+用例分两类 (见 data/eval_cases.json 与 _BUILTIN_CASES):
+  - 检索用例: 有 expect_keywords —— 参与 hit_rate, judge 开启时额外打分
+  - 拒答用例: 有 expect_refusal=True —— 不参与 hit_rate (那是检索指标, 检索器
+    对任何问题都会返回 Top-K, 无法据此判定), 判定需真实生成回答, 故仅在
+    judge 开启时评估
 
 评测集: data/eval_cases.json (结构化), 文件不存在时回退内置用例。
 评测较慢 (每用例 = 1 次生成 + 1 次评审), HTTP 走后台任务; CLI 可 --no-judge。
@@ -26,6 +34,7 @@ from app.core.metrics import (
     EVAL_COMPLETENESS,
     EVAL_FAITHFULNESS,
     EVAL_HIT_RATE,
+    EVAL_REFUSAL_ACCURACY,
 )
 from app.infrastructure.llm import LLMClient
 from app.services.rag_service import RagService
@@ -58,10 +67,15 @@ _BUILTIN_CASES: list[dict] = [
     {"id": "lost-time-1", "question": "疑似遗失预警后要多长时间完成找寻?",
      "expect_keywords": ["遗失", "24小时"],
      "required_points": ["24小时", "全网找寻"]},
+    # 拒答用例: 知识库中不存在「投诉处理」相关内容, 期望系统如实拒答而非编造
     {"id": "complaint-1", "question": "客户投诉客服不跟进怎么办?",
-     "expect_keywords": ["投诉"],
-     "required_points": []},
+     "expect_refusal": True},
 ]
+
+# 拒答判定标记: 回答中出现任一即视为「如实拒答」(与 rag_service 的 system prompt 对齐)
+_REFUSAL_MARKERS: tuple[str, ...] = (
+    "无法回答", "没有相关", "不包含", "未提及", "无法确定", "无相关",
+)
 
 # 评审 LLM 的 system prompt
 _JUDGE_SYSTEM = (
@@ -162,7 +176,13 @@ class EvalService:
         """跑一轮评测。
 
         judge=None 时按配置 (settings.eval_judge) 决定是否启用 LLM 评分。
-        返回 {hit_rate, faithfulness_avg, completeness_avg, top_k, judge, config, details}
+
+        用例分两类, 分开统计 (见模块 docstring):
+          - 检索用例 (expect_keywords): 参与 hit_rate, judge 开启时额外打分
+          - 拒答用例 (expect_refusal): 不参与 hit_rate, 仅在 judge 开启时评估
+
+        返回 {hit_rate, refusal_accuracy, faithfulness_avg, completeness_avg,
+              top_k, judge, config, details}
         """
         use_judge = self._settings.eval_judge if judge is None else judge
         now = time.time()
@@ -170,20 +190,51 @@ class EvalService:
         baseline = self._history.latest_before(now, judge=use_judge)
         details = []
         hits = 0
+        answerable = 0       # 参与 hit_rate 的检索用例数
         judged = 0
         f_sum = c_sum = 0.0
+        refusal_checked = 0  # 实际评估的拒答用例数
+        refusal_passed = 0
         for case in self._cases:
             question = case["question"]
             chunks = self._rag.retrieve(question, top_k=top_k)
+            top_sim = round(chunks[0]["similarity"], 4) if chunks else 0.0
+
+            # ── 拒答用例: 知识库无答案, 期望系统如实拒答而非编造 ──
+            if case.get("expect_refusal"):
+                detail = {
+                    "case_id": case.get("id", ""),
+                    "question": question,
+                    "kind": "refusal",
+                    "expect": "REFUSE",
+                    "hit": None,  # 拒答用例不参与检索命中率
+                    "top_similarity": top_sim,
+                }
+                if use_judge and chunks:
+                    try:
+                        answer = self._rag.generate(question, chunks)
+                        refused = any(m in answer for m in _REFUSAL_MARKERS)
+                        refusal_checked += 1
+                        refusal_passed += refused
+                        detail.update({"answer": answer, "refused": refused})
+                    except Exception as e:  # 单用例失败不拖垮整轮
+                        logger.exception("拒答用例评估失败 question=%s", question)
+                        detail["reason"] = f"eval_error: {type(e).__name__}: {e}"
+                details.append(detail)
+                continue
+
+            # ── 检索用例: Top-K 是否覆盖期望关键词 ──
             joined = "".join(c["content"] for c in chunks)
             hit = any(kw in joined for kw in case.get("expect_keywords", []))
+            answerable += 1
             hits += hit
             detail = {
                 "case_id": case.get("id", ""),
                 "question": question,
+                "kind": "retrieval",
                 "expect": "+".join(case.get("expect_keywords", [])),
                 "hit": hit,
-                "top_similarity": round(chunks[0]["similarity"], 4) if chunks else 0.0,
+                "top_similarity": top_sim,
             }
             if use_judge and chunks:
                 try:
@@ -204,9 +255,15 @@ class EvalService:
             details.append(detail)
 
         n = len(self._cases)
-        hit_rate = hits / n if n else 0.0
+        hit_rate = hits / answerable if answerable else 0.0
+        refusal_accuracy = refusal_passed / refusal_checked if refusal_checked else None
         result = {
             "hit_rate": round(hit_rate, 4),
+            "refusal_accuracy": (
+                round(refusal_accuracy, 4) if refusal_accuracy is not None else None
+            ),
+            "refusal_checked": refusal_checked,
+            "refusal_total": n - answerable,
             "faithfulness_avg": round(f_sum / judged, 4) if judged else None,
             "completeness_avg": round(c_sum / judged, 4) if judged else None,
             "judged_cases": judged,
@@ -217,13 +274,17 @@ class EvalService:
                 "chunk_size": self._settings.chunk_size,
                 "kb_chunks": self._rag.indexed_chunks,
             },
-            "compare": self._diff_vs(baseline, hit_rate, judged, f_sum, c_sum),
+            "compare": self._diff_vs(
+                baseline, hit_rate, judged, f_sum, c_sum,
+                refusal_accuracy, refusal_checked,
+            ),
             "details": details,
         }
         if self._record_history:
             self._history.append({
                 "ts": now,
                 "hit_rate": result["hit_rate"],
+                "refusal_accuracy": result["refusal_accuracy"],
                 "faithfulness_avg": result["faithfulness_avg"],
                 "completeness_avg": result["completeness_avg"],
                 "judged_cases": judged,
@@ -233,12 +294,17 @@ class EvalService:
             })
         # Prometheus: 刷新最近一轮评测指标
         EVAL_HIT_RATE.set(result["hit_rate"])
+        if result["refusal_accuracy"] is not None:
+            EVAL_REFUSAL_ACCURACY.set(result["refusal_accuracy"])
         if result["faithfulness_avg"] is not None:
             EVAL_FAITHFULNESS.set(result["faithfulness_avg"])
             EVAL_COMPLETENESS.set(result["completeness_avg"])
-        logger.info("eval_done hit_rate=%.4f faithfulness=%s completeness=%s cases=%d judged=%d",
-                    hit_rate, result["faithfulness_avg"], result["completeness_avg"],
-                    n, judged)
+        logger.info(
+            "eval_done hit_rate=%.4f refusal=%s (%d/%d) faithfulness=%s completeness=%s "
+            "cases=%d judged=%d",
+            hit_rate, result["refusal_accuracy"], refusal_passed, refusal_checked,
+            result["faithfulness_avg"], result["completeness_avg"], n, judged,
+        )
         return result
 
     # ── 内部: 回归对比 ───────────────────────────────────
@@ -249,6 +315,8 @@ class EvalService:
         judged: int,
         f_sum: float,
         c_sum: float,
+        refusal_accuracy: float | None = None,
+        refusal_checked: int = 0,
     ) -> dict | None:
         """与基准评测的差值 (delta), 无基准返回 None"""
         if not baseline:
@@ -257,6 +325,10 @@ class EvalService:
             "vs_ts": baseline.get("ts"),
             "hit_rate_delta": round(hit_rate - baseline.get("hit_rate", 0.0), 4),
         }
+        if refusal_checked and baseline.get("refusal_accuracy") is not None:
+            diff["refusal_accuracy_delta"] = round(
+                refusal_accuracy - baseline["refusal_accuracy"], 4
+            )
         if judged:
             f_avg = round(f_sum / judged, 4)
             c_avg = round(c_sum / judged, 4)

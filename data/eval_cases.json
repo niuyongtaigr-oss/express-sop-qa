@@ -32,7 +32,7 @@
   {
     "id": "complaint-1",
     "question": "客户投诉客服不跟进怎么办?",
-    "expect_keywords": ["投诉"],
-    "required_points": []
+    "_comment": "拒答用例: 知识库中不存在「投诉处理」相关内容, 期望系统如实拒答而非编造",
+    "expect_refusal": true
   }
 ]

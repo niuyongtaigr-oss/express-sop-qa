@@ -11,12 +11,19 @@ class EvalRunResponse(BaseModel):
 
 
 class EvalCaseDetail(BaseModel):
-    """单条评测用例结果"""
+    """单条评测用例结果
+
+    两类用例结果字段不同:
+      - kind="retrieval": hit(bool) + 可选 faithfulness/completeness
+      - kind="refusal":    hit=None (不参与检索指标) + refused(bool)
+    """
 
     case_id: str = ""
     question: str
+    kind: str = "retrieval"            # retrieval | refusal
     expect: str = ""
-    hit: bool
+    hit: bool | None = None            # 检索用例: Top-K 是否覆盖期望关键词; 拒答用例恒为 None
+    refused: bool | None = None        # 拒答用例: 是否如实拒答 (未编造)
     top_similarity: float = 0.0
     answer: str | None = None          # LLM 生成答案 (启用 judge 时有)
     faithfulness: float | None = None  # 忠实性 0-1
@@ -30,6 +37,9 @@ class EvalTaskResponse(BaseModel):
     task_id: str
     status: str  # pending / running / done / error
     hit_rate: float | None = None
+    refusal_accuracy: float | None = None  # 拒答准确率 (judge 关闭时为 None)
+    refusal_checked: int | None = None     # 实际评估的拒答用例数
+    refusal_total: int | None = None       # 评测集中的拒答用例总数
     faithfulness_avg: float | None = None
     completeness_avg: float | None = None
     judged_cases: int | None = None

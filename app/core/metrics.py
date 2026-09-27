@@ -11,6 +11,7 @@
   kb_chunks                                  知识库 chunk 数
   session_active                             活跃会话数
   eval_hit_rate / eval_faithfulness_avg / eval_completeness_avg  最近一轮评测
+  eval_refusal_accuracy                      最近一轮评测拒答准确率
 """
 
 from prometheus_client import (
@@ -51,6 +52,9 @@ SESSION_ACTIVE = Gauge("session_active", "活跃会话数")
 EVAL_HIT_RATE = Gauge("eval_hit_rate", "最近一轮评测检索命中率")
 EVAL_FAITHFULNESS = Gauge("eval_faithfulness_avg", "最近一轮评测忠实性均值")
 EVAL_COMPLETENESS = Gauge("eval_completeness_avg", "最近一轮评测完整性均值")
+EVAL_REFUSAL_ACCURACY = Gauge(
+    "eval_refusal_accuracy", "最近一轮评测拒答准确率 (知识库无答案时应如实拒答)"
+)
 
 
 def metrics_response() -> bytes:
@@ -65,4 +69,5 @@ __all__ = [
     "CACHE_HITS", "CACHE_MISSES",
     "OLLAMA_UP", "KB_CHUNKS", "SESSION_ACTIVE",
     "EVAL_HIT_RATE", "EVAL_FAITHFULNESS", "EVAL_COMPLETENESS",
+    "EVAL_REFUSAL_ACCURACY",
 ]
