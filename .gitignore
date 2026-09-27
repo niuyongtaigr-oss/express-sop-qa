@@ -27,3 +27,7 @@ data/feedback.jsonl
 
 # 本地构建临时产物 (wheels/离线构建)
 .build/
+
+# 隐私自检的本地敏感词表 (绝不提交 —— 它装的就是不能进仓库的东西)
+# 规则见 scripts/check_privacy.py
+.privacy-terms

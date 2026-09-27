@@ -235,3 +235,38 @@ curl http://localhost:8000/api/v1/health
 pip install -r requirements-dev.txt
 .venv/bin/python -m pytest tests/ -q     # 无需 Ollama (Stub LLM/向量库驱动)
 ```
+
+## 隐私自检（本仓库是公开的）
+
+提交过的东西会**永久留在 git 历史里**——要清掉得改写历史 + force push。所以
+「不要带私密信息进去」被做成了可执行的检查，而不是一句口头约定：
+
+```bash
+python3 scripts/check_privacy.py               # 检查全部已跟踪文件
+python3 scripts/check_privacy.py --staged      # 只检查暂存区
+python3 scripts/check_privacy.py --history     # 检查全部提交历史（message + diff + 历史路径）
+python3 scripts/check_privacy.py --list-rules  # 打印当前生效的规则
+
+# 装成 pre-commit 钩子（推荐）
+ln -sf ../../scripts/check_privacy.py .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+```
+
+`tests/test_repo_hygiene.py` 会在每次 pytest 时跑同一套检查，CI 也能拦住。
+
+检查范围：手机号 / 邮箱 / 身份证号 / 本地绝对路径 / 常见密钥样式 / 私密文件名。
+
+**`--history` 为什么必要**：工作区干净 ≠ 历史干净。敏感信息可能在某次提交里
+出现过、后来又被删掉——当前文件里查不到，但它仍然留在变更记录里，只有改写
+历史才能清掉。**提交信息（commit message）同样要查**：改了文件内容却忘了改
+message 是很常见的疏漏，而 message 一样会永久留在公开仓库里。
+
+三个设计细节：
+
+- **检查脚本里不含任何具体敏感词**。把姓名、手机号写进检查脚本，等于换个文件
+  继续泄露。所以脚本只放「类别」正则，项目相关的自定义词通过环境变量
+  `SOP_QA_PRIVACY_TERMS`（逗号分隔）或本地 `.privacy-terms`（每行一个，已
+  gitignore）提供 —— 规则可以公开，「要防什么」留在本地。
+- **命中报告不回显原文**。检查输出会进 CI 日志，若把命中的手机号原样打出来，
+  这个检查本身就成了新的泄露渠道。报告只给「类别 + 文件:行号 + 长度」。
+- **正则不匹配自身源码**，否则自检永远失败、没人会认真对待它；测试里也有
+  一条用例专门守住这点。
