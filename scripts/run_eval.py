@@ -8,7 +8,7 @@
   python3 scripts/run_eval.py --force-reingest   # 强制重建索引后评测
   python3 scripts/run_eval.py --top-k 5
   python3 scripts/run_eval.py --scan-top-k "1,3,5"        # top_k 参数扫描 (P2-B)
-  python3 scripts/run_eval.py --compare-mode              # hybrid vs vector 对比 (P2-B)
+  python3 scripts/run_eval.py --compare-mode              # hybrid / vector / bm25 对照 (P2-B)
 """
 
 import argparse
@@ -74,7 +74,7 @@ def main() -> None:
     parser.add_argument("--scan-top-k", type=str, default=None,
                         help='top_k 参数扫描: 逗号分隔, 如 "1,3,5" (不调 LLM)')
     parser.add_argument("--compare-mode", action="store_true",
-                        help="对比 hybrid vs vector 检索模式 (临时索引, 不污染正式库)")
+                        help="对照 hybrid / vector / bm25 检索模式 (临时索引, 不污染正式库)")
     args = parser.parse_args()
 
     settings = get_settings()
@@ -123,10 +123,15 @@ def _scan_top_k(settings, embeddings, llm, csv: str) -> None:
 
 
 def _compare_modes(settings, embeddings, llm, top_k) -> None:
-    """hybrid vs vector 检索模式对比: 各自用独立临时索引, 不污染正式库"""
-    print("🆚 检索模式对比 (hybrid vs vector, 临时索引)...")
+    """检索模式对照: hybrid / vector / bm25, 各自用独立临时索引, 不污染正式库
+
+    三种都跑才能量化「混合检索的增益来自哪里」—— 只有 hybrid 与 vector 两组
+    数字时, 无法判断 BM25 到底有没有起作用。
+    """
+    print("🆚 检索模式对比 (hybrid / vector / bm25, 临时索引)...")
     top_k = top_k or settings.top_k
-    for mode in ("hybrid", "vector"):
+    hits: dict[str, float] = {}
+    for mode in ("hybrid", "vector", "bm25"):
         with tempfile.TemporaryDirectory(prefix="sopqa-cmp-") as d:
             store = ChromaVectorStore(
                 persist_dir=d,

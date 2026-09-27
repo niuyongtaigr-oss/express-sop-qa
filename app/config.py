@@ -43,12 +43,13 @@ class Settings(BaseSettings):
     # ── 知识库 ───────────────────────────────────────────
     sop_path: str = "data/sop.txt"        # SOP 文档 (相对项目根目录, 默认文档)
     sop_doc_id: str = "sop"               # 默认文档 ID (sop.txt 导入时使用)
+    corpus_dir: str = "data/corpus"       # 语料目录 (真实行业资料, 每篇一个文档)
     chroma_dir: str = "data/chroma"       # Chroma 持久化目录
     collection_name: str = "sop_knowledge"
     chunk_size: int = 200
     chunk_overlap: int = 40
     top_k: int = 3
-    retrieval_mode: str = "hybrid"        # hybrid=向量+BM25 融合(RRF) / vector=纯向量
+    retrieval_mode: str = "hybrid"        # hybrid=向量+BM25 融合(RRF) / vector=纯向量 / bm25=纯BM25
 
     # ── 文档解析 (上传入知识库) ──────────────────────────
     doc_max_bytes: int = 20 * 1024 * 1024  # 单文件体积上限 (字节), 默认 20 MB
@@ -99,6 +100,12 @@ class Settings(BaseSettings):
     @property
     def sop_file(self) -> Path:
         p = Path(self.sop_path)
+        return p if p.is_absolute() else PROJECT_ROOT / p
+
+    @property
+    def corpus_dir_path(self) -> Path:
+        """语料目录 (真实行业资料, 每篇导入为一个独立文档)"""
+        p = Path(self.corpus_dir)
         return p if p.is_absolute() else PROJECT_ROOT / p
 
     @property

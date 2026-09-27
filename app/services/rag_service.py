@@ -87,10 +87,13 @@ class RagService:
 
     # ── 建索引 / 文档管理 ────────────────────────────────
     def ingest(self, force: bool = False) -> tuple[int, bool]:
-        """导入默认 SOP 文档 (doc_id=sop)
+        """导入知识库全部文档: 默认 SOP + data/corpus/ 下的语料文件
 
         已有文档且未指定 force 时跳过 (幂等); force=true 先清空全部文档再导入。
-        返回 (chunk 数, 是否实际导入)。
+        返回 (chunk 总数, 是否实际导入)。
+
+        语料文件走**文档解析层**, 与上传路径共用同一套编码识别与文本清洗 ——
+        真实语料同样会有全角空格、异体字符之类的脏数据。
         """
         existing = self._store.count()
         if existing > 0 and not force:
@@ -98,17 +101,42 @@ class RagService:
             return existing, False
         if force and existing > 0:
             self._store.clear_all()
-        text = self._settings.sop_file.read_text(encoding="utf-8")
-        n = self._store.add_document(
-            doc_id=self._settings.sop_doc_id,
-            title=self._settings.sop_file.stem,
-            text=text,
-            tenant_id=self._settings.shared_tenant_id,  # 默认 SOP 进共享库
-        )
+
+        total = 0
+        # 1) 默认 SOP 文档
+        sop = self._settings.sop_file
+        if sop.exists():
+            text = sop.read_text(encoding="utf-8")
+            total += self._store.add_document(
+                doc_id=self._settings.sop_doc_id,
+                title=sop.stem,
+                text=text,
+                tenant_id=self._settings.shared_tenant_id,  # 默认 SOP 进共享库
+            )
+            logger.info("默认 SOP 导入完成: source=%s", sop)
+
+        # 2) 语料目录 (真实行业资料: 法规 / 规范 / 制度, 每篇一个文档)
+        corpus = self._settings.corpus_dir_path
+        if corpus.is_dir():
+            for path in sorted(corpus.iterdir()):
+                if not path.is_file() or path.name.startswith("."):
+                    continue
+                try:
+                    doc = self._loader.load(path.name, path.read_bytes())
+                except Exception as e:  # 单篇失败不拖垮整库导入
+                    logger.warning("语料导入失败, 跳过: %s (%s)", path.name, e)
+                    continue
+                total += self._store.add_document(
+                    doc_id=derive_doc_id(path.name),
+                    title=path.stem,
+                    text=doc.text,
+                    tenant_id=self._settings.shared_tenant_id,
+                )
+                logger.info("语料导入完成: %s (%d 字符)", path.name, len(doc.text))
+
         self._version += 1
-        logger.info("默认 SOP 文档导入完成: %d chunks, source=%s",
-                    n, self._settings.sop_file)
-        return n, True
+        logger.info("知识库导入完成: 共 %d chunks (corpus=%s)", total, corpus)
+        return total, True
 
     def add_document(
         self, doc_id: str, title: str, content: str, tenant_id: str = "default"

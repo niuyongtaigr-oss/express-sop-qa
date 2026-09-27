@@ -111,7 +111,7 @@ class ChromaVectorStore:
             metadata={"hnsw:space": "cosine"},
         )
         self._bm25: BM25Index | None = None
-        if self._mode == "hybrid":
+        if self._mode in ("hybrid", "bm25"):
             self._rebuild_bm25()
 
     # ── 文档管理 ─────────────────────────────────────────
@@ -207,7 +207,13 @@ class ChromaVectorStore:
     def retrieve(
         self, query: str, top_k: int = 3, tenant_id: str = "default"
     ) -> list[RetrievedChunk]:
-        """混合检索 (hybrid): 向量 + BM25 → RRF 融合, 按租户过滤; 纯向量走老路径"""
+        """检索 (按 retrieval_mode 分派), 按租户过滤
+
+        hybrid: 向量 + BM25 → RRF 融合 (默认)
+        vector: 纯向量
+        bm25:   纯 BM25 —— 保留此模式是为了能**量化混合检索的增益到底来自哪里**,
+                否则只有 hybrid 与 vector 两组数字时, 无法判断 BM25 是否真的在起作用
+        """
         total = self._collection.count()
         if total == 0:
             return []
@@ -222,7 +228,33 @@ class ChromaVectorStore:
                 (tenant_id, self._shared_tenant)
             ]
             return self._hybrid_merge(vec, bm, top_k)
+        if self._mode == "bm25" and self._bm25 is not None:
+            return self._query_bm25(query, top_k, tenant_id)
         return self._query_vector(query, top_k=top_k, where=tenant_filter)
+
+    def _query_bm25(
+        self, query: str, top_k: int, tenant_id: str
+    ) -> list[RetrievedChunk]:
+        """纯 BM25 检索 (评测对照用); 分数归一化映射到 (0.4, 0.9] 作为近似相似度"""
+        if self._bm25 is None:
+            return []
+        bm = [
+            (pos, score) for pos, score in self._bm25.top_k(query, k=top_k * 3)
+            if self._bm25.metadatas[pos].get("tenant_id") in
+            (tenant_id, self._shared_tenant)
+        ][:top_k]
+        if not bm:
+            return []
+        max_score = max(score for _, score in bm) or 1.0
+        return [
+            RetrievedChunk(
+                content=self._bm25.texts[pos],
+                metadata=self._bm25.metadatas[pos],
+                distance=0.0,
+                similarity=round(0.4 + 0.5 * (score / max_score), 4),
+            )
+            for pos, score in bm
+        ]
 
     # ── 内部: 向量查询 / RRF 融合 / BM25 维护 ─────────────
     def _query_vector(
