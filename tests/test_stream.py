@@ -146,3 +146,45 @@ async def test_stream_timeout_fallback():
     assert out[-1]["type"] == "done"
     assert out[-1]["intent"] == "degraded"
     assert sessions.get_history("s1") == []  # 降级不回写
+
+
+# ── 客户端断连 (回归) ────────────────────────────────────
+# 事件收尾曾经写在 finally 里: 客户端中途断连时 aclose() 会在 finally 处抛
+# GeneratorExit, 而 finally 又试图 yield → RuntimeError:
+# "async generator ignored GeneratorExit"。收尾必须在 finally 之外。
+
+
+@pytest.mark.asyncio
+async def test_stream_survives_client_disconnect():
+    """回归: 中途断连不得抛 GeneratorExit 相关异常"""
+    sessions = SessionStore()
+    svc = ChatService(
+        FakeGraph([_token_event("rag_qa", "理赔"), _token_event("rag_qa", "流程")]),
+        sessions,
+        make_settings(),
+    )
+    gen = svc.stream("包裹破损怎么理赔?", session_id="s1")
+    first = await anext(gen)
+    assert first["type"] == "intent"
+
+    # 模拟客户端断开: 关掉生成器。修复前这里抛
+    # RuntimeError: async generator ignored GeneratorExit
+    await gen.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stream_disconnect_does_not_write_partial_answer():
+    """断连时 answer_parts 是半截的, 不能写进历史污染下一轮上下文"""
+    sessions = SessionStore()
+    svc = ChatService(
+        FakeGraph([_token_event("rag_qa", "理赔")]),
+        sessions,
+        make_settings(),
+    )
+    gen = svc.stream("包裹破损怎么理赔?", session_id="s1")
+    await anext(gen)                     # intent
+    got = await anext(gen)               # answer_delta: "理赔"
+    assert got["delta"] == "理赔"
+    await gen.aclose()                   # 断连
+
+    assert sessions.get_history("s1") == []

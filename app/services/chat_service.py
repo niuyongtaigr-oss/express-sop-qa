@@ -145,7 +145,17 @@ class ChatService:
         session_id: str | None = None,
         tenant_id: str = "default",
     ) -> AsyncIterator[dict]:
-        """流式问答 (SSE): 真 token 级流式, 事件见模块 docstring"""
+        """流式问答 (SSE): 真 token 级流式, 事件见模块 docstring
+
+        事件收尾放在 try/finally **之外**, 这是刻意的:
+        若把 `done` 放在 finally 里 yield, 客户端中途断连时 aclose() 会在
+        finally 处抛 GeneratorExit, 而 finally 又试图 yield —— 触发
+        `RuntimeError: async generator ignored GeneratorExit`。
+        放到 finally 之外后, GeneratorExit 直接向上传播, 生成器干净关闭。
+
+        副作用 (也是想要的行为): 断连时既不发 `done`, 也不回写会话记忆 ——
+        此时 answer_parts 是半截的, 写进历史只会污染下一轮上下文。
+        """
         history = self._sessions.get_history(session_id)
         answer_parts: list[str] = []
         intent = "unknown"
@@ -176,17 +186,15 @@ class ChatService:
             failed = True
             logger.exception("stream 处理失败")
             yield {"type": "error", "error": f"{type(e).__name__}: {e}"}
-        finally:
-            # 只有真实完成才回写记忆; 超时降级/异常不污染历史
-            if not degraded and not failed:
-                self._sessions.add_turn(
-                    session_id, question, "".join(answer_parts)
-                )
-            yield {
-                "type": "done",
-                "trace_id": get_trace_id(),
-                "intent": intent,
-            }
+
+        # 只有走完正常路径 (非降级、非异常、且客户端没断连) 才回写记忆
+        if not degraded and not failed:
+            self._sessions.add_turn(session_id, question, "".join(answer_parts))
+        yield {
+            "type": "done",
+            "trace_id": get_trace_id(),
+            "intent": intent,
+        }
 
     # ── 内部: astream_events 事件解析 ────────────────────
     @staticmethod
