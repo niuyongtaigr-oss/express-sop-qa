@@ -16,7 +16,11 @@ from scripts.check_privacy import (  # noqa: E402  (需先补 sys.path)
     CONTENT_RULES,
     Hit,
     active_rules,
+    commit_identities,
+    format_identities,
     format_report,
+    identity_content_hits,
+    identity_hits,
     scan,
     scan_history,
     scan_staged,
@@ -150,3 +154,79 @@ def test_rules_do_not_self_match():
         assert re.search(pattern.pattern, pattern.pattern) is None, (
             f"规则自命中: {pattern.pattern}"
         )
+
+
+# ── 提交身份字段 ─────────────────────────────────────────
+# 这个字段和文件内容一样会公开显示在 GitHub 的每一次提交上, 却最容易没人看 ——
+# 用工作邮箱提交作品集仓库, 就是把任职单位域名挂在公开页面上。
+# 原先的检查完全没扫它 (只扫 message / diff / 路径)。
+
+def test_commit_identities_are_surfaced():
+    """必须真的读得到身份, 而且计数单位是"提交数"而不是"作者+提交者"的两倍"""
+    import scripts.check_privacy as cp
+
+    items = commit_identities()
+    assert items, "仓库里应当有提交"
+    commits = int(cp._git("rev-list", "--all", "--count"))
+    # 每个提交贡献一次计数 (作者与提交者是同一身份时只算一次)
+    assert sum(c for _, c in items) == commits
+    assert max(c for _, c in items) <= commits
+
+
+def test_identity_does_not_fail_by_default(monkeypatch):
+    """未配置允许清单时只提示不判失败
+
+    每个仓库的每次提交都必然带邮箱, 一律失败会让这个检查永远红着 ——
+    而永远红的检查等于没有检查。
+    """
+    monkeypatch.delenv("SOP_QA_PRIVACY_ALLOWED_IDENTITIES", raising=False)
+    assert identity_hits() == []
+
+
+def test_identity_allowlist_enables_strict_mode(monkeypatch):
+    """配置了允许清单, 不在清单里的身份就要判失败"""
+    monkeypatch.setenv("SOP_QA_PRIVACY_ALLOWED_IDENTITIES", "nobody@example.com")
+    hits = identity_hits()
+    assert hits and all("允许清单" in h.rule for h in hits)
+
+
+def test_identity_allowlist_match_passes(monkeypatch):
+    monkeypatch.setenv(
+        "SOP_QA_PRIVACY_ALLOWED_IDENTITIES",
+        ",".join(ident for ident, _ in commit_identities()),
+    )
+    assert identity_hits() == []
+
+
+def test_phone_in_identity_is_flagged_without_allowlist(monkeypatch):
+    """身份里出现手机号 —— 即使没配允许清单也必须判失败"""
+    monkeypatch.delenv("SOP_QA_PRIVACY_ALLOWED_IDENTITIES", raising=False)
+    hits = identity_content_hits(_sample("某人 <", _FAKE_PHONE, "@qq.com>"))
+    assert [h.rule for h in hits] == ["身份含手机号"]
+
+
+def test_plain_email_identity_is_not_a_content_hit():
+    """普通邮箱身份不算内容命中 —— 否则每次提交都命中, 检查永远红"""
+    assert identity_content_hits("someone <someone@example.com>") == []
+
+
+def test_identity_report_hides_identities_that_hit_rules(monkeypatch):
+    """身份命中敏感规则时, 报告里不得回显该身份 (与 format_report 一致)"""
+    import scripts.check_privacy as cp
+
+    monkeypatch.setattr(
+        cp, "commit_identities",
+        lambda: [(_sample("某人 <", _FAKE_PHONE, "@qq.com>"), 3)],
+    )
+    report = format_identities()
+    assert _FAKE_PHONE not in report
+    assert "已隐去" in report
+
+
+def test_identity_report_shows_normal_identities(monkeypatch):
+    """正常身份要照原样显示出来 —— 看不见就没法判断"""
+    import scripts.check_privacy as cp
+
+    monkeypatch.setattr(cp, "commit_identities",
+                        lambda: [("someone <someone@example.com>", 2)])
+    assert "someone <someone@example.com>" in format_identities()

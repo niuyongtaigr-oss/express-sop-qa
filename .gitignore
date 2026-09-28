@@ -25,6 +25,11 @@ data/feedback.jsonl
 .vscode/
 .DS_Store
 
+# 本地 AI 助手的个人配置 (可能含本机路径/权限清单)。
+# 本机已由全局 gitignore 兜住, 但全局配置不跟着仓库走 —— 换台机器 clone 后
+# `git add -A` 就会把它提交进去, 所以这里再写一遍。
+.claude/settings.local.json
+
 # 本地构建临时产物 (wheels/离线构建)
 .build/
 

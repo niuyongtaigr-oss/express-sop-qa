@@ -516,7 +516,8 @@ pip install -r requirements-dev.txt
 ```bash
 python3 scripts/check_privacy.py               # 检查全部已跟踪文件
 python3 scripts/check_privacy.py --staged      # 只检查暂存区
-python3 scripts/check_privacy.py --history     # 检查全部提交历史（message + diff + 历史路径）
+python3 scripts/check_privacy.py --history     # 全部提交历史（message + diff + 路径 + 作者身份）
+python3 scripts/check_privacy.py --identities  # 只看提交作者身份（会公开显示的那个字段）
 python3 scripts/check_privacy.py --list-rules  # 打印当前生效的规则
 
 # 装成 pre-commit 钩子（推荐）
@@ -531,6 +532,24 @@ ln -sf ../../scripts/check_privacy.py .git/hooks/pre-commit && chmod +x .git/hoo
 出现过、后来又被删掉——当前文件里查不到，但它仍然留在变更记录里，只有改写
 历史才能清掉。**提交信息（commit message）同样要查**：改了文件内容却忘了改
 message 是很常见的疏漏，而 message 一样会永久留在公开仓库里。
+
+### 还有一个最容易漏的字段：提交作者身份
+
+`git config user.email` 决定了**每一次提交都会公开显示一个邮箱**，它和文件内容
+一样挂在 GitHub 上，却没有"提交前看一眼"的习惯——用工作邮箱提交作品集仓库，
+就等于把任职单位域名放在了公开页面上。
+
+`--identities` / `--history` 会把这个字段打出来。判定分两档：
+
+- 身份里出现**手机号 / 身份证号 / 本地路径** → **判失败**（那不是正常的提交身份）
+- 身份里只是一个**没被允许清单收入的工作邮箱** → 只提示、不判失败。每个仓库的
+  每次提交都必然带邮箱，一律失败会让检查永远红着——而永远红的检查等于没有检查
+
+要严格拦住，设 `SOP_QA_PRIVACY_ALLOWED_IDENTITIES='name <email>'`（逗号分隔）。
+
+**注意：已提交的身份改不掉。** 改 `user.email` 只影响之后的提交；清理旧提交必须
+改写历史 + force push，而且旧提交在 GitHub 上按精确 SHA 仍然可以解析出来
+（本仓库已经踩过一次，见「已知遗留」）。
 
 三个设计细节：
 
