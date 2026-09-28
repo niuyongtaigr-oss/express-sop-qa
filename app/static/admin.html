@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>快递 SOP 知识库 · 管理台</title>
+<!--
+  单文件、零依赖、无 CDN —— 受限网络里也能打开。
+  本页自身不持有任何数据: 所有内容都由 /api/v1/* 实时拉取, 页面代码里没有密钥、
+  没有语料。密钥只存在**本标签页**的 sessionStorage 里 (关掉标签页即消失), 且只
+  用于作为 X-API-Key 发给同源的 API。
+
+  安全注意: 文档标题 / doc_id 来自服务端, 渲染时一律用 textContent 或
+  createElement, **绝不拼 innerHTML** —— 否则一篇标题里带 <script> 的文档就能在
+  管理员浏览器里执行脚本。
+-->
+<style>
+  :root { --fg:#1f2328; --muted:#656d76; --line:#d0d7de; --bg:#f6f8fa;
+          --accent:#0969da; --danger:#cf222e; --ok:#1a7f37; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px; font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+         color:var(--fg); background:#fff; max-width:1000px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:0 0 12px; }
+  .sub { color:var(--muted); margin:0 0 20px; }
+  section { border:1px solid var(--line); border-radius:8px; padding:16px; margin-bottom:16px; }
+  label { display:block; font-size:13px; color:var(--muted); margin-bottom:4px; }
+  input[type=text], input[type=password], input[type=file] {
+    width:100%; padding:6px 8px; border:1px solid var(--line); border-radius:6px; font:inherit; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
+  .row > div { flex:1 1 200px; }
+  button { padding:6px 14px; border:1px solid var(--line); border-radius:6px;
+           background:var(--bg); font:inherit; cursor:pointer; white-space:nowrap; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.link { border:none; background:none; color:var(--danger); padding:2px 6px; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  table { width:100%; border-collapse:collapse; margin-top:12px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line);
+           vertical-align:top; word-break:break-all; }
+  th { font-size:12px; color:var(--muted); font-weight:600; }
+  code { background:var(--bg); padding:1px 4px; border-radius:4px; font-size:12px; }
+  #msg { margin:0 0 16px; padding:10px 12px; border-radius:6px; display:none; white-space:pre-wrap; }
+  #msg.ok { display:block; background:#dafbe1; color:var(--ok); }
+  #msg.err { display:block; background:#ffebe9; color:var(--danger); }
+  .stats { display:flex; gap:24px; flex-wrap:wrap; }
+  .stats b { font-size:20px; }
+  .hint { color:var(--muted); font-size:12px; margin-top:6px; }
+  .neg { color:var(--danger); }
+</style>
+</head>
+<body>
+
+<h1>快递 SOP 知识库 · 管理台</h1>
+<p class="sub">本页不持有数据；所有操作都实时调用同源 API。<a href="/docs">接口文档</a></p>
+
+<div id="msg"></div>
+
+<section>
+  <h2>访问密钥</h2>
+  <div class="row">
+    <div>
+      <label for="key">X-API-Key（服务端配置了访问控制时必填）</label>
+      <input id="key" type="password" placeholder="留空则不带密钥请求" autocomplete="off">
+    </div>
+    <div style="flex:0 0 auto"><button class="primary" id="save">保存并刷新</button></div>
+    <div style="flex:0 0 auto"><button id="clear">清除</button></div>
+  </div>
+  <p class="hint">密钥只保存在本标签页的 sessionStorage，关闭标签页即消失，不会写入服务端。</p>
+</section>
+
+<section>
+  <h2>知识库文档</h2>
+  <div class="row">
+    <div style="flex:0 0 auto"><button id="reload">刷新列表</button></div>
+    <div style="flex:0 0 auto"><button id="ingest">按清单增量重建</button></div>
+    <div style="flex:0 0 auto"><button id="reingest">全量重建（慢）</button></div>
+    <div style="flex:0 0 auto"><span class="hint" id="chunks"></span></div>
+  </div>
+  <table>
+    <thead><tr><th>doc_id</th><th>标题</th><th>chunk 数</th><th></th></tr></thead>
+    <tbody id="docs"></tbody>
+  </table>
+  <p class="hint" id="empty" style="display:none">知识库还是空的，用下面的上传把第一份文档放进来。</p>
+</section>
+
+<section>
+  <h2>上传文档</h2>
+  <div class="row">
+    <div>
+      <label for="file">文件</label>
+      <input id="file" type="file">
+    </div>
+    <div>
+      <label for="docid">doc_id（可留空，同名覆盖）</label>
+      <input id="docid" type="text" placeholder="例如 网点操作手册">
+    </div>
+    <div>
+      <label for="title">标题（可留空，默认取文件名）</label>
+      <input id="title" type="text" placeholder="例如 网点操作手册（2024）">
+    </div>
+    <div style="flex:0 0 auto"><button class="primary" id="upload">上传并入库</button></div>
+  </div>
+  <p class="hint" id="formats"></p>
+</section>
+
+<section>
+  <h2>用户反馈</h2>
+  <div class="stats">
+    <div><div class="hint">总条数</div><b id="fb-total">-</b></div>
+    <div><div class="hint">平均分</div><b id="fb-avg">-</b></div>
+    <div><div class="hint">负面数</div><b id="fb-neg" class="neg">-</b></div>
+    <div><div class="hint">负面率</div><b id="fb-rate" class="neg">-</b></div>
+  </div>
+  <table>
+    <thead><tr><th>问题</th><th>评分</th><th>纠错</th></tr></thead>
+    <tbody id="fb-rows"></tbody>
+  </table>
+  <p class="hint" id="fb-empty" style="display:none">还没有低分反馈。</p>
+  <p class="hint">统计只包含当前密钥所属租户的反馈。</p>
+</section>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+function apiKey() { return sessionStorage.getItem("sop_qa_api_key") || ""; }
+
+function say(text, kind) {
+  const el = $("msg");
+  el.textContent = text;                 // textContent: 服务端回显的内容不当作 HTML
+  el.className = kind || "";
+  if (kind === "ok") setTimeout(() => { el.className = ""; }, 4000);
+}
+
+async function call(path, options) {
+  const opts = Object.assign({}, options);
+  opts.headers = Object.assign({}, opts.headers);
+  const k = apiKey();
+  if (k) opts.headers["X-API-Key"] = k;
+  const res = await fetch(path, opts);
+  if (res.status === 401) throw new Error("认证失败（401）：请检查访问密钥");
+  if (res.status === 429) throw new Error("被限流（429）：请稍后再试");
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    const d = body && (body.detail || (body.error && body.error.message));
+    throw new Error(typeof d === "string" ? d : ("请求失败 HTTP " + res.status));
+  }
+  return body;
+}
+
+function cell(text) { const td = document.createElement("td"); td.textContent = text; return td; }
+
+// ── 文档列表 ──────────────────────────────────────────────
+async function loadDocs() {
+  const tbody = $("docs");
+  tbody.replaceChildren();
+  try {
+    const data = await call("/api/v1/rag/docs");
+    const docs = data.documents || [];
+    $("chunks").textContent = "清单内共 " + data.total_chunks + " 个 chunk";
+    $("empty").style.display = docs.length ? "none" : "block";
+    for (const d of docs) {
+      const tr = document.createElement("tr");
+      tr.append(cell(d.doc_id), cell(d.title), cell(String(d.chunk_count)));
+      const td = document.createElement("td");
+      const btn = document.createElement("button");
+      btn.className = "link";
+      btn.textContent = "删除";
+      btn.onclick = () => removeDoc(d.doc_id);
+      td.append(btn);
+      tr.append(td);
+      tbody.append(tr);
+    }
+  } catch (e) { say(e.message, "err"); }
+}
+
+async function removeDoc(docId) {
+  if (!confirm("删除文档「" + docId + "」及其全部 chunk？")) return;
+  try {
+    const r = await call("/api/v1/rag/docs/" + encodeURIComponent(docId), { method: "DELETE" });
+    say("已删除 " + r.doc_id + "（" + r.removed_chunks + " 个 chunk）", "ok");
+    loadDocs();
+  } catch (e) { say(e.message, "err"); }
+}
+
+// ── 重建索引 ──────────────────────────────────────────────
+async function ingest(force) {
+  try {
+    say(force ? "全量重建中…（语料大时需要一会儿）" : "增量重建中…");
+    const r = await call("/api/v1/rag/ingest" + (force ? "?force=true" : ""), { method: "POST" });
+    say("完成：索引 " + r.indexed_chunks + " 个 chunk，" + (r.rebuilt ? "本次实际导入了" : "无变化"), "ok");
+    loadDocs();
+  } catch (e) { say(e.message, "err"); }
+}
+
+// ── 上传 ─────────────────────────────────────────────────
+async function upload() {
+  const f = $("file").files[0];
+  if (!f) { say("请先选择文件", "err"); return; }
+  const fd = new FormData();
+  fd.append("file", f);
+  if ($("docid").value.trim()) fd.append("doc_id", $("docid").value.trim());
+  if ($("title").value.trim()) fd.append("title", $("title").value.trim());
+  try {
+    say("上传解析中…");
+    const r = await call("/api/v1/rag/docs/upload", { method: "POST", body: fd });
+    const info = r.source || {};
+    say("已入库 " + r.doc_id + "（" + r.indexed_chunks + " 个 chunk"
+        + (info.chars ? "，" + info.chars + " 字" : "") + "）", "ok");
+    $("file").value = ""; $("docid").value = ""; $("title").value = "";
+    loadDocs();
+  } catch (e) { say(e.message, "err"); }
+}
+
+// ── 反馈 ─────────────────────────────────────────────────
+async function loadFeedback() {
+  const tbody = $("fb-rows");
+  tbody.replaceChildren();
+  try {
+    const s = await call("/api/v1/chat/feedback/stats");
+    $("fb-total").textContent = s.total;
+    $("fb-avg").textContent = s.avg_rating === null ? "-" : s.avg_rating;
+    $("fb-neg").textContent = s.negative_count;
+    $("fb-rate").textContent = (s.negative_rate * 100).toFixed(1) + "%";
+    const rows = s.recent_negative || [];
+    $("fb-empty").style.display = rows.length ? "none" : "block";
+    for (const n of rows) {
+      const tr = document.createElement("tr");
+      tr.append(cell(n.question), cell(String(n.rating)), cell(n.comment || ""));
+      tbody.append(tr);
+    }
+  } catch (e) { say(e.message, "err"); }
+}
+
+async function loadFormats() {
+  try {
+    const f = await call("/api/v1/rag/docs/formats");
+    $("file").setAttribute("accept", (f.extensions || []).join(","));
+    $("formats").textContent = "支持格式：" + (f.extensions || []).join(" / ");
+  } catch (e) { /* 列表拿不到不影响上传尝试 */ }
+}
+
+function refreshAll() { loadDocs(); loadFeedback(); }
+
+$("save").onclick = () => {
+  const v = $("key").value.trim();
+  if (v) sessionStorage.setItem("sop_qa_api_key", v);
+  else sessionStorage.removeItem("sop_qa_api_key");
+  say("密钥已保存到本标签页", "ok");
+  refreshAll();
+};
+$("clear").onclick = () => {
+  sessionStorage.removeItem("sop_qa_api_key");
+  $("key").value = "";
+  say("已清除本标签页的密钥", "ok");
+};
+$("reload").onclick = refreshAll;
+$("ingest").onclick = () => ingest(false);
+$("reingest").onclick = () => ingest(true);
+$("upload").onclick = upload;
+
+$("key").value = apiKey();
+loadFormats();
+refreshAll();
+</script>
+</body>
+</html>

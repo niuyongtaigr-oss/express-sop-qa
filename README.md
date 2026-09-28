@@ -75,6 +75,19 @@
 | GET | `/api/v1/eval/tasks/{task_id}` | 轮询评测结果（hit_rate/拒答准确率/忠实性/完整性 + 回归对比 compare） | 是* |
 
 \* 配置了 `SOP_QA_API_KEY` 时需携带 `X-API-Key` 请求头；未配置则放行并日志告警（仅本地开发）。
+
+页面（不在 `/api/v1` 前缀下，也不出现在 `/docs` 接口清单里）：
+
+| 路径 | 功能 |
+|------|------|
+| `GET /` | 302 → `/admin` |
+| `GET /admin` | **极简管理台**：文档清单 / 上传 / 删除 / 重建索引 / 反馈统计 |
+
+管理台是**单文件 HTML，零依赖、无 CDN**（受限网络也能打开），且**自身不持有任何
+数据**——没有密钥、没有语料，内容全靠页面里的 JS 实时调同源 API 拉取；访问密钥由
+使用者在页面输入，只存在自己浏览器的 `sessionStorage`（关标签页即消失）。所以页面
+本身可以公开，真正的访问控制仍在 API 层。它与「CORS 默认关闭」是配套的：同源，不
+需要开 CORS。
 启用 `SOP_QA_RATE_LIMIT_ENABLED=true` 后，上述业务接口额外按 `X-API-Key`/IP 限流（429 + `Retry-After`）。
 `SOP_QA_RATE_LIMIT_PER_MIN` 必须 ≥1（为 0 会导致令牌永不补充且算 `Retry-After` 时除零）。
 
@@ -253,8 +266,10 @@ cp .env.example .env          # 按需修改
 #   a) 把 .env 里的 SOP_QA_ENV 改成 dev
 #   b) 启动时显式覆盖（推荐，不污染 .env）：
 SOP_QA_ENV=dev uvicorn app.main:app --port 8000        # 或 python3 -m app.main
-# 文档: http://127.0.0.1:8000/docs
+# 管理台: http://127.0.0.1:8000/admin
+# 接口文档: http://127.0.0.1:8000/docs
 # 指标: http://127.0.0.1:8000/api/v1/metrics
+# 管理台（上传文档 / 看反馈）: http://127.0.0.1:8000/admin
 # 访问控制状态: http://127.0.0.1:8000/api/v1/health → auth 字段
 # 依赖是否就绪: http://127.0.0.1:8000/api/v1/health/ready (不可用返回 503)
 
@@ -272,6 +287,7 @@ python3 scripts/run_eval.py --compare-mode     # hybrid vs vector 对比
 ```bash
 docker compose up -d
 # 首次会自动拉取 Ollama 模型 (qwen2.5:7b + bge-m3, 约 6GB), 完成后 app 才启动
+open http://localhost:8000/admin                     # 管理台: 上传/删除文档, 看反馈
 curl http://localhost:8000/api/v1/health        # 存活: 恒定 200
 curl -i http://localhost:8000/api/v1/health/ready   # 就绪: 依赖不齐返回 503
 ```

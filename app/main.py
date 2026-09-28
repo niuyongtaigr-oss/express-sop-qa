@@ -16,10 +16,12 @@ import asyncio
 import contextlib
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, RedirectResponse
 
 from app.api.v1.router import api_v1_router
 from app.config import Settings, get_settings
@@ -162,6 +164,30 @@ def _setup_cors(app: FastAPI, settings: Settings) -> None:
     )
 
 
+def _mount_console(app: FastAPI) -> None:
+    """挂载极简管理台 (/admin) —— 单文件 HTML, 无外部依赖。
+
+    为什么需要它: `/rag/docs` 这些接口都能用, 但目标用户是企业管理员, 不会用
+    curl。缺一个能"看见并操作知识库"的页面, 功能再全也交付不出去。
+
+    为什么页面本身可以不鉴权: 它**自身不持有任何数据** —— 没有密钥、没有语料,
+    内容全靠 JS 实时调同源 API 拉取; 密钥由使用者在页面里输入, 只存在自己浏览器
+    的 sessionStorage 里。所以真正需要管的访问控制仍在 API 层由 verify_api_key
+    负责 (prod 下未配置访问控制会直接拒绝启动)。
+
+    与 CORS 默认关闭是配套的: 页面与 API 同源, 因此不需要开 CORS。
+    """
+    html = Path(__file__).resolve().parent / "static" / "admin.html"
+
+    @app.get("/admin", include_in_schema=False)
+    async def admin_console() -> FileResponse:
+        return FileResponse(html, media_type="text/html")
+
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        return RedirectResponse("/admin")
+
+
 def create_app() -> FastAPI:
     """应用工厂 — 创建并装配 FastAPI 实例"""
     app = FastAPI(
@@ -173,6 +199,7 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
     app.add_middleware(RequestLoggingMiddleware)
     _setup_cors(app, get_settings())
+    _mount_console(app)
     app.include_router(api_v1_router)
     return app
 
