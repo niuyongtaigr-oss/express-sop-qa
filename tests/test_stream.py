@@ -109,11 +109,11 @@ async def test_stream_full_pipeline_with_memory():
         _node_end_event("rag_qa", {"answer": "理赔流程", "sources": [{"content": "c"}]}),
     ])
     svc = ChatService(graph, sessions, make_settings())
-    out = [ev async for ev in svc.stream("包裹破损怎么理赔?", session_id="s1")]
+    out = [ev async for ev in svc.stream("包裹破损怎么理赔?", session_id="s1", tenant_id="tenant")]
     types = [o["type"] for o in out]
     assert types == ["intent", "answer_delta", "answer_delta", "sources", "done"]
     # 记忆回写: user + assistant 各一条
-    hist = sessions.get_history("s1")
+    hist = sessions.get_history("tenant", "s1")
     assert hist[0] == {"role": "user", "content": "包裹破损怎么理赔?"}
     assert hist[1] == {"role": "assistant", "content": "理赔流程"}
     assert out[-1]["intent"] == "rag_qa"
@@ -123,12 +123,12 @@ async def test_stream_full_pipeline_with_memory():
 async def test_stream_error_event_still_done():
     sessions = SessionStore()
     svc = ChatService(FakeGraph([], fail=True), sessions, make_settings())
-    out = [ev async for ev in svc.stream("你好", session_id="s1")]
+    out = [ev async for ev in svc.stream("你好", session_id="s1", tenant_id="tenant")]
     types = [o["type"] for o in out]
     assert types == ["error", "done"]
     assert "graph broken" in out[0]["error"]
     # 出错不污染记忆
-    assert sessions.get_history("s1") == []
+    assert sessions.get_history("tenant", "s1") == []
 
 
 @pytest.mark.asyncio
@@ -140,12 +140,12 @@ async def test_stream_timeout_fallback():
 
     sessions = SessionStore()
     svc = ChatService(SlowGraph(), sessions, make_settings(chat_timeout_s=0.05))
-    out = [ev async for ev in svc.stream("问题", session_id="s1")]
+    out = [ev async for ev in svc.stream("问题", session_id="s1", tenant_id="tenant")]
     assert out[0]["type"] == "answer_delta"
     assert "超时" in out[0]["delta"]
     assert out[-1]["type"] == "done"
     assert out[-1]["intent"] == "degraded"
-    assert sessions.get_history("s1") == []  # 降级不回写
+    assert sessions.get_history("tenant", "s1") == []  # 降级不回写
 
 
 # ── 客户端断连 (回归) ────────────────────────────────────
@@ -163,7 +163,7 @@ async def test_stream_survives_client_disconnect():
         sessions,
         make_settings(),
     )
-    gen = svc.stream("包裹破损怎么理赔?", session_id="s1")
+    gen = svc.stream("包裹破损怎么理赔?", session_id="s1", tenant_id="tenant")
     first = await anext(gen)
     assert first["type"] == "intent"
 
@@ -181,10 +181,10 @@ async def test_stream_disconnect_does_not_write_partial_answer():
         sessions,
         make_settings(),
     )
-    gen = svc.stream("包裹破损怎么理赔?", session_id="s1")
+    gen = svc.stream("包裹破损怎么理赔?", session_id="s1", tenant_id="tenant")
     await anext(gen)                     # intent
     got = await anext(gen)               # answer_delta: "理赔"
     assert got["delta"] == "理赔"
     await gen.aclose()                   # 断连
 
-    assert sessions.get_history("s1") == []
+    assert sessions.get_history("tenant", "s1") == []

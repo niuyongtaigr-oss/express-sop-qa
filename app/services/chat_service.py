@@ -67,6 +67,17 @@ class ChatService:
                 ttl_s=settings.cache_ttl_s,
                 max_entries=settings.cache_max_entries,
             )
+        # 超时链路自检: chat_timeout_s 走 asyncio.wait_for 取消的是**协程**, 而
+        # asyncio.to_thread 里的**线程不可取消**。只有 LLM 自己先超时, 线程才会
+        # 真正结束、信号量释放才与"实际占用"一致。否则超时后线程仍在跑, 实际
+        # 并发会超过 max_concurrency —— 信号量形同虚设。
+        if settings.llm_timeout_s >= settings.chat_timeout_s:
+            logger.warning(
+                "llm_timeout_s (%.0fs) >= chat_timeout_s (%.0fs): LLM 会晚于外层超时, "
+                "取消协程后线程仍在跑 → 并发上限失效。建议 llm_timeout_s 明显小于 "
+                "chat_timeout_s。",
+                settings.llm_timeout_s, settings.chat_timeout_s,
+            )
 
     @property
     def cache_stats(self) -> dict:
@@ -120,7 +131,7 @@ class ChatService:
         answer = result.get("answer", "")
         # 记忆回写: 只有真实回答才入库, 降级提示不污染历史
         if not cached and intent != "degraded":
-            self._sessions.add_turn(session_id, question, answer)
+            self._sessions.add_turn(tenant_id, session_id, question, answer)
         # Prometheus 指标
         CHAT_REQUESTS.labels(intent).inc()
         if not cached:
@@ -156,7 +167,7 @@ class ChatService:
         副作用 (也是想要的行为): 断连时既不发 `done`, 也不回写会话记忆 ——
         此时 answer_parts 是半截的, 写进历史只会污染下一轮上下文。
         """
-        history = self._sessions.get_history(session_id)
+        history = self._sessions.get_history(tenant_id, session_id)
         answer_parts: list[str] = []
         intent = "unknown"
         degraded = False
@@ -189,7 +200,9 @@ class ChatService:
 
         # 只有走完正常路径 (非降级、非异常、且客户端没断连) 才回写记忆
         if not degraded and not failed:
-            self._sessions.add_turn(session_id, question, "".join(answer_parts))
+            self._sessions.add_turn(
+                tenant_id, session_id, question, "".join(answer_parts)
+            )
         yield {
             "type": "done",
             "trace_id": get_trace_id(),
@@ -236,7 +249,7 @@ class ChatService:
         async def _run() -> dict:
             async with self._semaphore:
                 # 先取历史再进线程池 (读取很快, 不占信号量窗口太久)
-                history = self._sessions.get_history(session_id)
+                history = self._sessions.get_history(tenant_id, session_id)
                 # graph.invoke 是同步阻塞调用, 丢线程池执行
                 return await asyncio.to_thread(
                     self._graph.invoke,

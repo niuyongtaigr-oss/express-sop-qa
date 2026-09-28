@@ -58,3 +58,39 @@ async def verify_api_key(
     # compare_digest 防时序侧信道
     if not provided or not hmac.compare_digest(provided, settings.api_key):
         raise UnauthorizedError("缺少或错误的 X-API-Key")
+
+
+# ── 访问控制自检 ─────────────────────────────────────────
+
+def auth_status(settings: Settings) -> str:
+    """当前访问控制状态 — 供 /health 暴露, 让运维看得见自己有没有裸奔"""
+    if settings.tenant_mode:
+        return "tenant"
+    return "enabled" if settings.api_key else "disabled"
+
+
+def assert_secure_settings(settings: Settings) -> None:
+    """启动自检: 生产模式必须配置访问控制 (fail-closed)
+
+    为什么需要它: 默认是 fail-open —— 未配置 SOP_QA_API_KEY 时直接放行, 只打
+    一条 warning 日志。对一个承载企业内部知识库的服务, 这是不可接受的交付形态:
+
+      · docker-compose 的默认值是「无 key + 限流关闭」
+      · 使用者照 README 起容器, 得到的是一台无鉴权、无限流的公网服务
+      · 而唯一的信号是日志里一行 warning —— 没人会看见
+
+    所以在 prod 下不再"警告后放行", 而是**拒绝启动**, 并在错误信息里给出
+    具体怎么办。本地开发请显式设置 SOP_QA_ENV=dev。
+    """
+    if settings.env.strip().lower() != "prod":
+        return
+    if settings.tenant_mode:
+        return  # 多租户模式靠租户清单鉴别, 不需要 api_key
+    if settings.api_key:
+        return
+    raise RuntimeError(
+        "生产模式 (SOP_QA_ENV=prod) 必须配置访问控制, 拒绝启动。\n"
+        "  单租户: 设置 SOP_QA_API_KEY —— 可用 `openssl rand -hex 24` 生成\n"
+        "  多租户: 设置 SOP_QA_TENANT_MODE=true 并提供 data/tenants.json\n"
+        "  本地开发若确实不需要校验: 显式设置 SOP_QA_ENV=dev"
+    )

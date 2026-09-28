@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends
 from app.api.deps import get_rag_service, get_settings
 from app.config import Settings
 from app.core.metrics import KB_CHUNKS, OLLAMA_UP
+from app.core.security import auth_status
 from app.schemas.common import HealthResponse
 from app.services.rag_service import RagService
 
@@ -39,4 +40,6 @@ async def health(
         status="ok",
         indexed_chunks=rag_service.indexed_chunks,
         ollama=ollama,
+        env=settings.env,
+        auth=auth_status(settings),
     )

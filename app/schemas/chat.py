@@ -8,7 +8,14 @@ class ChatRequest(BaseModel):
 
     question: str = Field(min_length=1, max_length=2000, description="用户问题")
     session_id: str | None = Field(
-        default=None, max_length=64, description="会话 ID (多轮记忆, 同 ID 共享上下文)"
+        default=None,
+        min_length=16,
+        max_length=64,
+        description=(
+            "会话 ID (多轮记忆, 同 ID 共享上下文)。由调用方生成, **必须不可猜测**"
+            "(建议 UUID4) —— 服务端只按租户隔离, 不区分租户内的最终用户, "
+            "能给出同一个 ID 的人就能读到该会话历史。"
+        ),
     )
 
 

@@ -27,11 +27,19 @@ class Settings(BaseSettings):
 
     # ── 应用 ────────────────────────────────────────────
     log_level: str = "INFO"
+    # dev | prod。prod 下启动自检会强制要求访问控制, 未配置则拒绝启动 ——
+    # 默认 fail-open 对企业知识库不可接受 (详见 core/security.assert_secure_settings)
+    env: str = "dev"
 
     # ── Ollama / 模型 ────────────────────────────────────
     ollama_base_url: str = "http://localhost:11434"
     llm_model: str = "qwen2.5:7b"
     embed_model: str = "bge-m3"
+    # LLM 单次调用超时 (秒)。**必须小于 chat_timeout_s** ——
+    # chat_timeout_s 走 asyncio.wait_for 取消协程, 但 asyncio.to_thread 里的
+    # 线程不可取消; 只有 LLM 自己先超时, 线程才会真正结束, 信号量释放才与
+    # "实际占用"一致。否则信号量形同虚设 (见 README「并发约束」)。
+    llm_timeout_s: float = 50.0
 
     # ── 多模型路由 (P3-C) ────────────────────────────────
     llm_provider: str = "ollama"        # ollama | openai (OpenAI 兼容协议)

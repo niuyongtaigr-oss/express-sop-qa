@@ -138,9 +138,56 @@ data: [DONE]
 - `SOP_QA_CACHE_ENABLED` / `SOP_QA_CACHE_TTL_S`：无会话答案缓存开关 / 过期秒数
 - `SOP_QA_RATE_LIMIT_ENABLED` / `SOP_QA_RATE_LIMIT_PER_MIN` / `SOP_QA_RATE_QUOTA_DAILY`：按 Key 限流/配额
 - `SOP_QA_MAX_CONCURRENCY` / `SOP_QA_CHAT_TIMEOUT_S`：限流并发数 / 超时秒数
+- `SOP_QA_LLM_TIMEOUT_S`：LLM 单次调用超时，**必须小于 `SOP_QA_CHAT_TIMEOUT_S`**（原因见「安全」）
 - `SOP_QA_MULTI_HOP_MAX_ROUNDS` / `SOP_QA_MULTI_HOP_SIMILARITY_THRESHOLD`：多轮检索参数
 - `SOP_QA_EVAL_JUDGE` / `SOP_QA_EVAL_CASES_PATH`：LLM-as-Judge 开关 / 评测集路径
-- `SOP_QA_API_KEY`：可选 API Key 鉴权
+- `SOP_QA_ENV`：`dev` | `prod`（`prod` 下强制要求访问控制，见「安全」）
+- `SOP_QA_API_KEY`：API Key；`SOP_QA_TENANT_MODE`：多租户模式
+
+## 安全
+
+### 访问控制默认 fail-closed
+
+`SOP_QA_ENV=prod` 时，**未配置访问控制会拒绝启动**：
+
+```
+RuntimeError: 生产模式 (SOP_QA_ENV=prod) 必须配置访问控制, 拒绝启动。
+  单租户: 设置 SOP_QA_API_KEY —— 可用 `openssl rand -hex 24` 生成
+  多租户: 设置 SOP_QA_TENANT_MODE=true 并提供 data/tenants.json
+  本地开发若确实不需要校验: 显式设置 SOP_QA_ENV=dev
+```
+
+原先是 fail-open（未配置就放行，只打一条 warning）。对一个承载企业内部知识库的
+服务，这个默认值不可接受——使用者照文档起容器会得到一台无鉴权、无限流的公网服务，
+而唯一的信号是日志里一行 warning，**没人会看见**。
+
+`docker-compose.yml` 的默认值是 `prod`，即**容器部署按生产对待**；本地直接跑
+`uvicorn` 保持 `dev` 的宽松默认。
+
+`GET /api/v1/health` 会返回 `auth` 字段（`enabled` / `tenant` / `disabled`）与
+`env`，让运维一眼看到自己有没有裸奔。
+
+### 会话隔离只到租户，不到用户
+
+`session_id` 由**调用方生成**，服务端只按 `(tenant_id, session_id)` 复合键隔离。
+接口强制 `session_id` 长度 ≥16：
+
+- 多租户下：租户之间无法互相命中 ✅
+- **单租户下：谁能给出同一个 `session_id`，谁就能读到那段对话历史** ⚠️
+
+所以 `session_id` 必须由调用方生成成不可猜测的值（建议 UUID4）。
+**若需要用户级隔离，得先引入用户身份概念——当前 API 没有这个维度。**
+
+### 超时链路：LLM 必须先于外层超时
+
+`chat_timeout_s` 走 `asyncio.wait_for`，取消的是**协程**；而 LLM 调用跑在
+`asyncio.to_thread` 里，**线程不可取消**。所以：
+
+> 如果 `llm_timeout_s >= chat_timeout_s`，外层会先取消协程、释放信号量，
+> 而线程仍在跑 —— **`max_concurrency` 形同虚设**，实际并发可以超标。
+
+默认 `llm_timeout_s=50 < chat_timeout_s=60`，让 LLM 自己先超时、线程自然结束。
+配置反了会在启动时打 warning。
 
 ## 本地启动
 
@@ -151,9 +198,13 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env          # 按需修改
 
-uvicorn app.main:app --port 8000        # 或 python3 -m app.main
+# .env.example 默认 SOP_QA_ENV=prod（复制即安全）。本地开发两种方式二选一：
+#   a) 把 .env 里的 SOP_QA_ENV 改成 dev
+#   b) 启动时显式覆盖（推荐，不污染 .env）：
+SOP_QA_ENV=dev uvicorn app.main:app --port 8000        # 或 python3 -m app.main
 # 文档: http://127.0.0.1:8000/docs
 # 指标: http://127.0.0.1:8000/api/v1/metrics
+# 访问控制状态: http://127.0.0.1:8000/api/v1/health → auth 字段
 
 # 命令行评测（不启动 HTTP）
 python3 scripts/run_eval.py                    # 完整评测 (含 LLM 评分)

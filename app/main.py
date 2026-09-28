@@ -32,7 +32,12 @@ async def lifespan(app: FastAPI):
     """应用生命周期: 启动时建/加载索引并装配编排图"""
     settings = get_settings()
     setup_logging(settings.log_level)
-    logger.info("应用启动中... llm=%s embed=%s", settings.llm_model, settings.embed_model)
+    # 启动自检: prod 下未配置访问控制直接拒绝启动 (fail-closed)
+    from app.core.security import assert_secure_settings
+
+    assert_secure_settings(settings)
+    logger.info("应用启动中... env=%s llm=%s embed=%s",
+                settings.env, settings.llm_model, settings.embed_model)
 
     # 重依赖延迟到启动时加载 (infrastructure 工厂内部懒 import)
     from app.agents.graph import build_chat_graph

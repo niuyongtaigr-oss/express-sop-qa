@@ -42,22 +42,38 @@ class LLMClient(Protocol):
 
 
 class OllamaLLMClient:
-    """ChatOllama 实现 — 懒加载底层客户端 (首次调用才初始化)"""
+    """ChatOllama 实现 — 懒加载底层客户端 (首次调用才初始化)
 
-    def __init__(self, model: str, base_url: str, temperature: float = 0):
+    ⚠️ 超时必须走 `client_kwargs={"timeout": ...}`。
+    直接传 `ChatOllama(timeout=...)` 会被**静默忽略** (该参数不在 ChatOllama
+    的字段里, 也不会透传到底层 ollama.Client) —— 那样超时形同没设。
+    """
+
+    def __init__(
+        self,
+        model: str,
+        base_url: str,
+        temperature: float = 0,
+        timeout_s: float | None = None,
+    ):
         self._model = model
         self._base_url = base_url
         self._temperature = temperature
+        self._timeout_s = timeout_s
         self._chat = None  # ChatOllama 懒加载
 
     def _get_chat(self):
         if self._chat is None:
             from langchain_ollama import ChatOllama
 
+            kwargs = {}
+            if self._timeout_s:
+                kwargs["client_kwargs"] = {"timeout": self._timeout_s}
             self._chat = ChatOllama(
                 model=self._model,
                 base_url=self._base_url,
                 temperature=self._temperature,
+                **kwargs,
             )
         return self._chat
 
@@ -92,22 +108,28 @@ class OpenAILLMClient:
         base_url: str,
         api_key: str | None = None,
         temperature: float = 0,
+        timeout_s: float | None = None,
     ):
         self._model = model
         self._base_url = base_url
         self._api_key = api_key or "sk-no-key"  # 本地 vLLM 等可能不需要 key
         self._temperature = temperature
+        self._timeout_s = timeout_s
         self._chat = None
 
     def _get_chat(self):
         if self._chat is None:
             from langchain_openai import ChatOpenAI
 
+            kwargs = {}
+            if self._timeout_s:
+                kwargs["timeout"] = self._timeout_s
             self._chat = ChatOpenAI(
                 model=self._model,
                 base_url=self._base_url,
                 api_key=self._api_key,
                 temperature=self._temperature,
+                **kwargs,
             )
         return self._chat
 
@@ -142,18 +164,20 @@ def create_llm_client(
         # openai provider 时回答模型优先 openai_model, 否则回退 llm_model
         model = settings.openai_model or settings.llm_model if provider == "openai" else settings.llm_model
     if provider == "openai":
-        logger.info("创建 OpenAI 兼容 LLM: model=%s base_url=%s",
-                    model, settings.openai_base_url)
+        logger.info("创建 OpenAI 兼容 LLM: model=%s base_url=%s timeout=%ss",
+                    model, settings.openai_base_url, settings.llm_timeout_s)
         return OpenAILLMClient(
             model=model,
             base_url=settings.openai_base_url,
             api_key=settings.openai_api_key,
+            timeout_s=settings.llm_timeout_s,
         )
-    logger.info("创建 Ollama LLM: model=%s base_url=%s",
-                model, settings.ollama_base_url)
+    logger.info("创建 Ollama LLM: model=%s base_url=%s timeout=%ss",
+                model, settings.ollama_base_url, settings.llm_timeout_s)
     return OllamaLLMClient(
         model=model,
         base_url=settings.ollama_base_url,
+        timeout_s=settings.llm_timeout_s,
     )
 
 

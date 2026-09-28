@@ -54,6 +54,10 @@ services:
       SOP_QA_OLLAMA_BASE_URL: http://ollama:11434
       SOP_QA_LLM_MODEL: ${SOP_QA_LLM_MODEL:-qwen2.5:7b}
       SOP_QA_EMBED_MODEL: ${SOP_QA_EMBED_MODEL:-bge-m3}
+      # 容器部署默认按生产对待: 没配访问控制会**拒绝启动**, 而不是裸奔放行。
+      # 本地开发请显式设 SOP_QA_ENV=dev。
+      SOP_QA_ENV: ${SOP_QA_ENV:-prod}
+      # 生成: openssl rand -hex 24
       SOP_QA_API_KEY: ${SOP_QA_API_KEY:-}
       SOP_QA_LOG_LEVEL: ${SOP_QA_LOG_LEVEL:-INFO}
       # 可选: 多模型路由 / 限流 / 缓存等, 全部见 .env.example
