@@ -60,3 +60,37 @@ def test_feedback_schema_validation():
         raise AssertionError("应校验失败")
     except ValidationError:
         pass
+
+
+def test_file_growth_is_bounded_by_compaction(tmp_path):
+    """JSONL 原本只追加不回收 —— 内存有上限 (max_entries), 磁盘没有。
+
+    每累计 max_entries 次写入压缩一次: 文件重写为当前保留的条目。
+    """
+    p = tmp_path / "fb.jsonl"
+    store = FeedbackStore(p, max_entries=10)
+    for i in range(25):
+        store.append({"question": f"q{i}", "rating": 5})
+
+    lines = [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) < 25          # 从不压缩的话这里就是 25
+    assert len(lines) <= 20         # 上界 = max_entries + 一轮未压缩的写入
+    assert store.stats()["total"] == 10
+
+
+def test_compacted_file_is_still_valid_jsonl(tmp_path):
+    """压缩后必须是合法 JSONL, 且保留的是**最近**的条目, 且无残留 .tmp"""
+    import json
+
+    p = tmp_path / "fb.jsonl"
+    store = FeedbackStore(p, max_entries=5)
+    for i in range(12):
+        store.append({"question": f"q{i}", "rating": 5})
+
+    entries = [json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert entries[-1]["question"] == "q11"          # 最新的还在
+    assert all(set(e) >= {"question", "rating", "ts"} for e in entries)
+    assert not (tmp_path / "fb.jsonl.tmp").exists()  # 原子替换, 不留半截文件
+
+    # 压缩后仍能被新实例读回
+    assert FeedbackStore(p, max_entries=5).stats()["total"] == 5

@@ -114,6 +114,51 @@ def make_direct_node(llm: LLMClient):
     return direct_node
 
 
+def _chunk_key(chunk: dict) -> tuple:
+    """chunk 的唯一键 —— 用 (doc_id, chunk_index), **不能用内容前缀**。
+
+    法规条文的前若干字符高度相似 (「第X条 经营快递业务的企业应当……」),
+    按内容前缀去重会把不同条款判成重复而**静默丢弃** —— 引用不全会直接
+    削弱 multi_hop 的价值, 而且没有任何报错。
+    """
+    meta = chunk.get("metadata", {})
+    doc_id = meta.get("doc_id", "")
+    index = meta.get("chunk_index")
+    if index is not None:
+        return (doc_id, index)
+    # 元数据缺失时退回内容本身 (此时只可能误"少去重", 不会误删)
+    return (doc_id, chunk.get("content", ""))
+
+
+def _dedupe_and_rank(chunks: list[dict]) -> list[dict]:
+    """按 chunk 唯一键去重 (保留相似度最高的一份), 再按相似度降序排序。
+
+    排序是必须的: `all_chunks` 是「第一轮全部 + 第二轮全部 + …」的**拼接序**,
+    直接截断会让第一轮的低分结果挤掉第二轮的高分结果 —— 而多跳的意义恰恰是
+    「第二轮补上第一轮缺的信息」, 拼接序把这个收益削掉了。
+    """
+    best: dict[tuple, dict] = {}
+    for c in chunks:
+        key = _chunk_key(c)
+        cur = best.get(key)
+        if cur is None or c.get("similarity", 0.0) > cur.get("similarity", 0.0):
+            best[key] = c
+    # sorted 稳定: 同分保持轮次原序
+    return sorted(best.values(), key=lambda c: c.get("similarity", 0.0), reverse=True)
+
+
+def _to_source(chunk: dict) -> dict:
+    """chunk → sources 条目 (字段与 RagService._to_sources 对齐)"""
+    meta = chunk.get("metadata", {})
+    return {
+        "content": chunk["content"],
+        "doc_id": meta.get("doc_id", ""),
+        "title": meta.get("title", ""),
+        "tags": meta.get("tags", ""),
+        "similarity": round(chunk["similarity"], 4),
+    }
+
+
 def make_multi_hop_node(rag_service: RagService, llm: LLMClient, settings: Settings):
     """多轮检索节点: 检索 → 相似度阈值判断 → LLM 改写 query 再检索 (最多 N 轮)
 
@@ -159,23 +204,13 @@ def make_multi_hop_node(rag_service: RagService, llm: LLMClient, settings: Setti
                 break
             query = new_query
             logger.info("multi_hop round=%d query改写: %s → %s", rnd, state["question"], query)
+
+        # 去重 + 按相关度重排后再截断 (不能用拼接序, 见 _dedupe_and_rank)
+        ranked = _dedupe_and_rank(all_chunks)
         answer = rag_service.generate(
-            state["question"], all_chunks[: settings.top_k * 2], history=history
+            state["question"], ranked[: settings.top_k * 2], history=history
         )
-        # 去重 sources (按内容前缀), 字段与 RagService._to_sources 对齐
-        seen, sources = set(), []
-        for c in all_chunks:
-            key = c["content"][:50]
-            if key not in seen:
-                seen.add(key)
-                meta = c.get("metadata", {})
-                sources.append({
-                    "content": c["content"],
-                    "doc_id": meta.get("doc_id", ""),
-                    "title": meta.get("title", ""),
-                    "tags": meta.get("tags", ""),
-                    "similarity": round(c["similarity"], 4),
-                })
-        return {"answer": answer, "sources": sources, "rounds": rounds}
+        return {"answer": answer, "sources": [_to_source(c) for c in ranked],
+                "rounds": rounds}
 
     return multi_hop_node

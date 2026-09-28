@@ -38,6 +38,10 @@ logger = logging.getLogger(__name__)
 # 超时降级时的友好提示 (fallback)
 _FALLBACK_ANSWER = "当前咨询人数较多或问题较复杂，处理超时。请稍后重试，或尝试简化您的问题。"
 
+# 链路异常时的友好提示。与流式路径保持一致: 流式发 error 事件后仍给 done,
+# 非流式原先直接 500 —— 同一产品两种体验, 这里补齐。
+_ERROR_ANSWER = "服务暂时不可用，请稍后重试。如持续出现请联系管理员。"
+
 # 产生答案 token 的节点 (intent 节点的结构化输出 token 不推送给前端)
 _ANSWER_NODES = {"rag_qa", "direct", "multi_hop"}
 
@@ -269,6 +273,16 @@ class ChatService:
             logger.warning("chat 超时降级 (>%ss)", self._settings.chat_timeout_s)
             return {
                 "answer": _FALLBACK_ANSWER,
+                "intent": "degraded",
+                "sources": [],
+            }
+        except Exception:
+            # 非超时异常原先直接冒到 API 层变 500, 而流式路径是转成 error 事件后
+            # 正常收尾 —— 同一份产品两条链路容错不一致。这里补齐。
+            # 用 logger.exception 保留完整堆栈: 兜底是为了用户体验, 不是为了藏 bug。
+            logger.exception("chat 处理失败, 已降级返回")
+            return {
+                "answer": _ERROR_ANSWER,
                 "intent": "degraded",
                 "sources": [],
             }

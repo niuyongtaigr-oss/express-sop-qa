@@ -148,3 +148,75 @@ async def test_cache_stats_shape():
     assert stats["hits"] == 0 and stats["misses"] == 1
     assert stats["hit_rate"] == 0.0
     assert stats["size"] == 1
+
+
+def test_cache_never_shares_mutable_state():
+    """缓存与外部永不共享可变对象 (读、写两侧都要拷贝)
+
+    get 侧不拷贝的症状: 某个调用方"顺手改一下 result", 后续所有命中同一 key 的
+    用户都拿到被改过的答案 —— 偶发、跨请求、无法从单请求日志复现。
+    set 侧不拷贝的症状: 存入后再改原 dict, 缓存内容跟着变。
+    """
+    c = ChatCache(max_entries=8)
+    original = {"answer": "x", "sources": [{"content": "c", "similarity": 0.9}]}
+    c.set("k", original)
+
+    got = c.get("k")
+    got["answer"] = "被改过"
+    got["sources"][0]["content"] = "被改过"
+    assert c.get("k") == {"answer": "x", "sources": [{"content": "c", "similarity": 0.9}]}
+
+    original["answer"] = "外部又改了"
+    assert c.get("k")["answer"] == "x"
+
+
+class ExplodingGraph:
+    """图内抛异常 (模拟 LLM/向量库故障)"""
+
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, inputs):
+        self.calls += 1
+        raise RuntimeError("LLM 挂了")
+
+    async def astream_events(self, inputs, version="v2"):
+        raise RuntimeError("LLM 挂了")
+        yield  # pragma: no cover — 让它是 async generator
+
+
+@pytest.mark.asyncio
+async def test_chat_exception_degrades_instead_of_500():
+    """图内异常 → 友好降级 (与流式的 error 事件对齐), 而不是冒到 API 层变 500"""
+    from app.services.chat_service import _ERROR_ANSWER
+
+    graph, sessions = ExplodingGraph(), SessionStore()
+    svc = ChatService(graph, sessions, make_settings(cache_enabled=False))
+    res = await svc.chat("问题")
+
+    assert res["intent"] == "degraded"
+    assert res["answer"] == _ERROR_ANSWER
+    assert res["sources"] == []
+    assert graph.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_exception_is_not_cached():
+    """异常降级不能写缓存 —— 否则故障期间所有问同一句话的人都拿到这条错误提示"""
+    graph, sessions = ExplodingGraph(), SessionStore()
+    svc = ChatService(graph, sessions, make_settings())
+    await svc.chat("问题")
+    await svc.chat("问题")
+    assert graph.calls == 2                  # 未命中缓存
+    assert svc.cache_stats["size"] == 0      # 降级不入缓存
+
+
+@pytest.mark.asyncio
+async def test_chat_exception_not_written_to_history():
+    """异常降级不能污染会话历史 —— 下一轮会把它当上下文喂回模型"""
+    graph, sessions = ExplodingGraph(), SessionStore()
+    svc = ChatService(graph, sessions, make_settings(cache_enabled=False))
+    sid = "s" * 20
+    res = await svc.chat("问题", session_id=sid)
+    assert res["intent"] == "degraded"
+    assert sessions.get_history("default", sid) == []

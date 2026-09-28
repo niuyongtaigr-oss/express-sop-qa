@@ -25,6 +25,8 @@ class FeedbackStore:
         self._max = max_entries
         self._lock = threading.Lock()
         self._entries: list[dict] = self._load()
+        # 距上次压缩的写入数: 文件是 append-only, 不压缩会无限增长
+        self._writes_since_compact = 0
 
     def _load(self) -> list[dict]:
         if not self._path.exists():
@@ -54,6 +56,12 @@ class FeedbackStore:
             with self._path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             total = len(self._entries)
+            # 每累计 max_entries 次写入压缩一次: 把文件重写为当前保留的条目。
+            # 否则 JSONL 只追加不回收 —— 内存有上限, 磁盘没有。
+            self._writes_since_compact += 1
+            if self._writes_since_compact >= self._max:
+                self._compact_locked()
+                self._writes_since_compact = 0
         rating = entry.get("rating", 0)
         if rating <= 2:
             logger.warning(
@@ -61,6 +69,18 @@ class FeedbackStore:
                 rating, entry.get("question", ""), entry.get("comment", ""),
             )
         return total
+
+    def _compact_locked(self) -> None:
+        """把 JSONL 重写为当前保留的条目 (调用方需已持锁)"""
+        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        try:
+            with tmp.open("w", encoding="utf-8") as f:
+                for e in self._entries:
+                    f.write(json.dumps(e, ensure_ascii=False) + "\n")
+            tmp.replace(self._path)  # 原子替换, 中断不会留下半截文件
+            logger.info("feedback 已压缩至 %d 条", len(self._entries))
+        except OSError as e:
+            logger.warning("feedback 压缩失败: %s", e)
 
     def stats(self) -> dict:
         with self._lock:

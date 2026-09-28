@@ -8,6 +8,7 @@
 🏭 Java 对标: Caffeine 短 TTL 缓存 + 写操作失效
 """
 
+import copy
 import hashlib
 import logging
 import threading
@@ -43,11 +44,16 @@ class ChatCache:
                 del self._data[key]
                 return None
             self._data.move_to_end(key)  # LRU 刷新
-            return value
+            # 返回深拷贝: 直接给引用的话, 调用方任何一次"顺手改一下 result"
+            # 都会污染缓存, 症状是"某些用户拿到别人的答案" —— 极难排查。
+            return copy.deepcopy(value)
 
     def set(self, key: str, value: dict) -> None:
         with self._lock:
-            self._data[key] = (time.time(), value)
+            # 与 get 对称地拷贝: 否则存入后调用方再改这个 dict, 缓存内容会跟着变。
+            # 一次拷贝 vs 一次 LLM 调用 (秒级) 完全不成比例, 换来「缓存与外部
+            # 永不共享可变状态」这条无例外的性质, 排查成本因此归零。
+            self._data[key] = (time.time(), copy.deepcopy(value))
             self._data.move_to_end(key)
             while len(self._data) > self._max:
                 self._data.popitem(last=False)

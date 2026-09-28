@@ -27,6 +27,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["eval"], dependencies=[Depends(verify_api_key), Depends(enforce_rate_limit)])
 
+# 任务登记表上限: 内存态 dict, 不设上限就是内存泄漏 —— 每次 /eval/run 加一条且
+# 永不清理。超出后按插入序淘汰最旧的。
+_MAX_EVAL_TASKS = 50
+
+
+def _prune_tasks(tasks: dict) -> None:
+    """淘汰最旧的评测任务 (dict 保持插入序, 从头部删即最旧)"""
+    while len(tasks) > _MAX_EVAL_TASKS:
+        tasks.pop(next(iter(tasks)), None)
+
 
 async def _run_eval_task(
     task_id: str,
@@ -53,6 +63,7 @@ async def eval_run(
     """提交检索命中率评测 (后台任务), 立即返回 task_id"""
     task_id = uuid.uuid4().hex[:8]
     tasks[task_id] = {"status": "pending"}
+    _prune_tasks(tasks)
     asyncio.create_task(_run_eval_task(task_id, tasks, eval_service, settings.top_k))
     return EvalRunResponse(task_id=task_id, status="pending")
 

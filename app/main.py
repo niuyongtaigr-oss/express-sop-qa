@@ -13,9 +13,11 @@
 """
 
 import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 
 from app.api.v1.router import api_v1_router
@@ -86,9 +88,14 @@ async def lifespan(app: FastAPI):
             try:
                 await asyncio.wait_for(stop_sweep.wait(), settings.session_sweep_interval_s)
             except asyncio.TimeoutError:
-                await asyncio.to_thread(sessions.sweep)
-                await asyncio.to_thread(rate_limiter.sweep)
-                SESSION_ACTIVE.set(sessions.count())
+                # 单次清理失败不能让后台任务死掉 —— 否则清理静默停止且无告警,
+                # 会话与限流桶会一直堆积到进程重启。
+                try:
+                    await asyncio.to_thread(sessions.sweep)
+                    await asyncio.to_thread(rate_limiter.sweep)
+                    SESSION_ACTIVE.set(sessions.count())
+                except Exception:
+                    logger.exception("后台清理失败, 本轮跳过")
 
     sweep_task = asyncio.create_task(_session_sweeper())
 
@@ -102,6 +109,8 @@ async def lifespan(app: FastAPI):
     app.state.sessions = sessions
     app.state.feedback_store = FeedbackStore(settings.feedback_file)
     app.state.rate_limiter = rate_limiter
+    # 探活复用一个 httpx client —— /health 每次新建连接会让高频探针放大开销
+    app.state.ollama_probe = httpx.AsyncClient(timeout=2.0)
     # P4 多租户: tenant_mode 时加载租户清单 (X-API-Key → tenant_id)
     app.state.tenant_registry = TenantRegistry(
         settings.tenants_file if settings.tenant_mode else None
@@ -114,7 +123,11 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         stop_sweep.set()
+        # 取消后要 await, 否则任务可能仍在跑 (取消不彻底)
         sweep_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sweep_task
+        await app.state.ollama_probe.aclose()
         logger.info("应用已关闭")
 
 

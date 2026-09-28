@@ -7,7 +7,7 @@
 import logging
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from app.api.deps import get_rag_service, get_settings
 from app.config import Settings
@@ -23,15 +23,18 @@ router = APIRouter(tags=["health"])
 
 @router.get("/health", response_model=HealthResponse)
 async def health(
+    request: Request,
     rag_service: RagService = Depends(get_rag_service),
     settings: Settings = Depends(get_settings),
 ) -> HealthResponse:
     """服务存活 + 知识库索引状态 + Ollama 可达性 (同时刷新 Prometheus 状态指标)"""
     ollama = "down"
     try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            r = await client.get(f"{settings.ollama_base_url}/api/tags")
-            ollama = "up" if r.status_code == 200 else "down"
+        # 复用 lifespan 里创建的 client (连接池), 不每次新建
+        r = await request.app.state.ollama_probe.get(
+            f"{settings.ollama_base_url}/api/tags"
+        )
+        ollama = "up" if r.status_code == 200 else "down"
     except httpx.HTTPError:
         ollama = "down"
     OLLAMA_UP.set(1 if ollama == "up" else 0)
