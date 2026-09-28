@@ -20,13 +20,38 @@ class ChatRequest(BaseModel):
 
 
 class SourceItem(BaseModel):
-    """引用来源 (检索命中的知识块)"""
+    """引用来源 (检索命中的知识块)
+
+    `doc_id` + `chunk_index` 让引用**可定位**: 前端能据此跳到原文对应段落, 人工
+    也能复核模型有没有真的引用这一段。"引用了哪个文档"与"引用了哪一段"是两件
+    事 —— 只给文档级出处时, 一段被误引用的回答看起来完全正常。
+    """
 
     content: str
     doc_id: str = ""
     title: str = ""
     tags: str = ""
+    chunk_index: int | None = Field(
+        default=None, description="该块在文档内的序号 (0 起), 用于定位原文段落"
+    )
     similarity: float = 0.0
+
+    @classmethod
+    def from_chunk(cls, chunk: dict) -> "SourceItem":
+        """检索命中的 chunk → DTO
+
+        只此一处做这个映射: 原先 `RagService` 与 multi_hop 节点各写一份,
+        加字段时漏改其中一份不会有任何报错, 只是某个入口悄悄少一个字段。
+        """
+        meta = chunk.get("metadata") or {}
+        return cls(
+            content=chunk.get("content", ""),
+            doc_id=meta.get("doc_id") or "",
+            title=meta.get("title") or "",
+            tags=meta.get("tags") or "",
+            chunk_index=meta.get("chunk_index"),
+            similarity=round(chunk.get("similarity") or 0.0, 4),
+        )
 
 
 class ChatResponse(BaseModel):

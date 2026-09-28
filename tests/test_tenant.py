@@ -174,3 +174,36 @@ def test_non_tenant_mode_defaults_to_default_tenant():
     r = client.get("/x")
     assert r.status_code == 200
     assert r.json()["tenant_id"] == "default"
+
+
+def test_get_tenant_id_fails_closed_without_verify_api_key():
+    """路由漏挂 verify_api_key 时必须报错, **不能回退默认租户**
+
+    回退的话, 一个"忘了加依赖"的疏忽就直接变成跨租户读写默认租户的数据,
+    而且没有任何报错 —— 静默的越权比 500 危险得多。
+    """
+    app = FastAPI()
+
+    @app.get("/leaky")
+    async def leaky(tenant_id: str = Depends(get_tenant_id)):  # 故意不挂 verify_api_key
+        return {"tenant_id": tenant_id}
+
+    r = TestClient(app, raise_server_exceptions=False).get("/leaky")
+    assert r.status_code == 500          # 不是 200 + 悄悄读默认租户
+
+
+def test_get_tenant_id_uses_what_verify_api_key_wrote():
+    """正常链路不受影响: verify_api_key 写了什么就读到什么"""
+    app = FastAPI()
+
+    @app.get("/x")
+    async def x(_: None = Depends(verify_api_key), tenant_id: str = Depends(get_tenant_id)):
+        return {"tenant_id": tenant_id}
+
+    app.state.tenant_registry = TenantRegistry(None)
+    from app.config import get_settings
+
+    app.dependency_overrides[get_settings] = lambda: make_settings(tenant_mode=False)
+    r = TestClient(app).get("/x")
+    assert r.status_code == 200
+    assert r.json()["tenant_id"] == "default"

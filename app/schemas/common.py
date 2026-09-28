@@ -16,10 +16,18 @@ class ErrorResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """健康检查: 服务存活 + 知识库索引状态 + Ollama 可达性 + 访问控制状态"""
+    """存活探针 (liveness): 进程还活着 —— 不包含依赖状态 (那是 readiness 的事)"""
 
     status: str
-    indexed_chunks: int
-    ollama: str  # up / down
+    indexed_chunks: int = 0
     env: str = "dev"        # dev / prod
     auth: str = "disabled"  # enabled / tenant / disabled —— 让运维看得见是否裸奔
+
+
+class ReadyResponse(BaseModel):
+    """就绪探针 (readiness): 依赖齐备才 ready, 否则 503 + reasons 说明缺什么"""
+
+    status: str             # ready / not_ready
+    indexed_chunks: int = 0
+    ollama: str = "down"    # up / down
+    reasons: list[str] = []

@@ -16,7 +16,6 @@ from app.services.eval_service import EvalService
 from app.services.feedback_service import FeedbackStore
 from app.services.rag_service import RagService
 from app.services.session_service import SessionStore
-from app.services.tenant_service import DEFAULT_TENANT
 
 __all__ = ["get_settings", "get_rag_service", "get_chat_service",
            "get_eval_service", "get_eval_tasks", "get_session_store",
@@ -73,5 +72,17 @@ async def enforce_rate_limit(
 
 
 def get_tenant_id(request: Request) -> str:
-    """当前请求的租户 (P4 多租户): 由 verify_api_key 写入 request.state"""
-    return getattr(request.state, "tenant_id", DEFAULT_TENANT)
+    """当前请求的租户 (P4 多租户): 由 verify_api_key 写入 request.state
+
+    **fail-closed**: 取不到就报错, 绝不回退默认租户。回退的后果是——任何新接口
+    只要漏挂 verify_api_key, 就会静默地去读写默认租户的知识库与会话: 一个"忘了
+    加依赖"的疏忽直接变成跨租户越权, 而且没有任何报错。宁可 500 也不能默默读错
+    数据。本函数只负责读取, 租户上下文必须由 verify_api_key 写入。
+    """
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if not tenant_id:
+        raise RuntimeError(
+            "request.state.tenant_id 未设置: 该路由缺少 verify_api_key 依赖。"
+            "get_tenant_id 不会回退到默认租户 (那会造成静默的跨租户访问)。"
+        )
+    return tenant_id

@@ -57,7 +57,8 @@
 
 | 方法 | 路径 | 功能 | 鉴权 |
 |------|------|------|------|
-| GET | `/api/v1/health` | 健康检查：服务存活 + 索引 chunk 数 + Ollama 可达性 | 否 |
+| GET | `/api/v1/health` | **存活探针**（liveness）：进程能响应即 200，**不打网络、不探依赖** | 否 |
+| GET | `/api/v1/health/ready` | **就绪探针**（readiness）：探 Ollama + 查索引，不可用返回 **503** + `reasons` | 否 |
 | GET | `/api/v1/metrics` | Prometheus 指标（HTTP/chat/缓存/评测等，见 `app/core/metrics.py`） | 否 |
 | POST | `/api/v1/chat` | 智能问答主接口（意图识别→路由→回答），限流+超时降级，支持 `session_id` 多轮记忆 + 答案缓存 | 是* |
 | POST | `/api/v1/chat/stream` | 同上，SSE 真流式（token 级，事件带 `type` 字段，见下） | 是* |
@@ -75,6 +76,7 @@
 
 \* 配置了 `SOP_QA_API_KEY` 时需携带 `X-API-Key` 请求头；未配置则放行并日志告警（仅本地开发）。
 启用 `SOP_QA_RATE_LIMIT_ENABLED=true` 后，上述业务接口额外按 `X-API-Key`/IP 限流（429 + `Retry-After`）。
+`SOP_QA_RATE_LIMIT_PER_MIN` 必须 ≥1（为 0 会导致令牌永不补充且算 `Retry-After` 时除零）。
 
 ### 请求/响应示例
 
@@ -136,7 +138,7 @@ data: [DONE]
 - `SOP_QA_RETRIEVAL_MODE`：`hybrid`（向量+BM25 RRF 融合，默认）/ `vector`（纯向量）
 - `SOP_QA_SESSION_TTL_S` / `SOP_QA_SESSION_MAX_TURNS`：会话记忆过期时间 / 最大轮数
 - `SOP_QA_CACHE_ENABLED` / `SOP_QA_CACHE_TTL_S`：无会话答案缓存开关 / 过期秒数
-- `SOP_QA_RATE_LIMIT_ENABLED` / `SOP_QA_RATE_LIMIT_PER_MIN` / `SOP_QA_RATE_QUOTA_DAILY`：按 Key 限流/配额
+- `SOP_QA_RATE_LIMIT_ENABLED` / `SOP_QA_RATE_LIMIT_PER_MIN`(≥1) / `SOP_QA_RATE_LIMIT_BURST` / `SOP_QA_RATE_QUOTA_DAILY`：按 Key 限流/配额
 - `SOP_QA_MAX_CONCURRENCY` / `SOP_QA_CHAT_TIMEOUT_S`：限流并发数 / 超时秒数
 - `SOP_QA_LLM_TIMEOUT_S`：LLM 单次调用超时，**必须小于 `SOP_QA_CHAT_TIMEOUT_S`**（原因见「安全」）
 - `SOP_QA_MULTI_HOP_MAX_ROUNDS` / `SOP_QA_MULTI_HOP_SIMILARITY_THRESHOLD`：多轮检索参数
@@ -166,6 +168,20 @@ RuntimeError: 生产模式 (SOP_QA_ENV=prod) 必须配置访问控制, 拒绝启
 
 `GET /api/v1/health` 会返回 `auth` 字段（`enabled` / `tenant` / `disabled`）与
 `env`，让运维一眼看到自己有没有裸奔。
+
+### 存活探针与就绪探针必须分开
+
+两者的失败含义相反，混在一个接口里会让编排器做错事：
+
+- **存活失败 → 重启进程。** 依赖（Ollama / 索引）挂了时重启毫无帮助，还会掐断在途
+  请求、引发重启风暴。因此 `/api/v1/health` 不探依赖，也不打网络。
+- **就绪失败 → 摘掉流量，不动进程。** 这才是依赖故障时该做的动作。
+
+所以依赖是否可用问 `/api/v1/health/ready`：就绪返回 200，否则 503 并在 `reasons` 里
+一次列全缺什么（索引未建 / Ollama 不可达）。`docker-compose.yml` 的 healthcheck 用
+的是就绪探针——它表达的是「这套 stack 现在能不能服务」。
+
+两个探针都不做 API Key 校验（编排器不会带密钥），**只应暴露在集群内网**。
 
 ### 会话隔离只到租户，不到用户
 
@@ -205,6 +221,7 @@ SOP_QA_ENV=dev uvicorn app.main:app --port 8000        # 或 python3 -m app.main
 # 文档: http://127.0.0.1:8000/docs
 # 指标: http://127.0.0.1:8000/api/v1/metrics
 # 访问控制状态: http://127.0.0.1:8000/api/v1/health → auth 字段
+# 依赖是否就绪: http://127.0.0.1:8000/api/v1/health/ready (不可用返回 503)
 
 # 命令行评测（不启动 HTTP）
 python3 scripts/run_eval.py                    # 完整评测 (含 LLM 评分)
@@ -220,7 +237,8 @@ python3 scripts/run_eval.py --compare-mode     # hybrid vs vector 对比
 ```bash
 docker compose up -d
 # 首次会自动拉取 Ollama 模型 (qwen2.5:7b + bge-m3, 约 6GB), 完成后 app 才启动
-curl http://localhost:8000/api/v1/health
+curl http://localhost:8000/api/v1/health        # 存活: 恒定 200
+curl -i http://localhost:8000/api/v1/health/ready   # 就绪: 依赖不齐返回 503
 ```
 
 - 组成：`ollama`（推理服务）+ `ollama-pull`（一次性拉模型）+ `app`（本服务）
@@ -292,7 +310,8 @@ curl http://localhost:8000/api/v1/health
 - **P3-C 多模型路由**：`SOP_QA_LLM_PROVIDER` 切换 Ollama / OpenAI 兼容服务；
   `SOP_QA_INTENT_MODEL` 让意图识别走小模型省成本。
 - **P3-D 按 Key 限流**：`X-API-Key`/IP 令牌桶 + 每日配额，429 + `Retry-After`，
-  与全局信号量叠加使用。
+  与全局信号量叠加使用。令牌桶与当日配额**分开存放**：前者表满时只淘汰已回满的桶
+  （淘汰没回满的桶等于把限流白送回去），后者只在跨天时清理（丢了就是配额重置）。
 - **P3-E Docker 部署**：`docker compose up -d` 一键起 app + Ollama（自动拉模型）。
 - **P4 多租户隔离**：`SOP_QA_TENANT_MODE=true` 后 `X-API-Key` 映射租户
   （`data/tenants.json`），检索/文档按租户隔离；默认 SOP 进共享库（所有租户可检），

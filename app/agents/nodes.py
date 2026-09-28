@@ -21,6 +21,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from app.agents.state import ChatState, IntentDecision, RewriteQuery
 from app.config import Settings
 from app.infrastructure.llm import LLMClient
+from app.schemas.chat import SourceItem
 from app.services.rag_service import RagService
 
 logger = logging.getLogger(__name__)
@@ -148,15 +149,8 @@ def _dedupe_and_rank(chunks: list[dict]) -> list[dict]:
 
 
 def _to_source(chunk: dict) -> dict:
-    """chunk → sources 条目 (字段与 RagService._to_sources 对齐)"""
-    meta = chunk.get("metadata", {})
-    return {
-        "content": chunk["content"],
-        "doc_id": meta.get("doc_id", ""),
-        "title": meta.get("title", ""),
-        "tags": meta.get("tags", ""),
-        "similarity": round(chunk["similarity"], 4),
-    }
+    """chunk → sources 条目 (与 RagService._to_sources 共用同一份映射)"""
+    return SourceItem.from_chunk(chunk).model_dump()
 
 
 def make_multi_hop_node(rag_service: RagService, llm: LLMClient, settings: Settings):

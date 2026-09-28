@@ -3,7 +3,8 @@
 # 首次启动会拉取模型 (qwen2.5:7b + bge-m3, 约 6GB), 请耐心等待:
 #   cp .env.example .env    # 按需修改 (SOP_QA_API_KEY 等)
 #   docker compose up -d
-#   curl http://localhost:8000/api/v1/health
+#   curl http://localhost:8000/api/v1/health          # 存活 (恒定 200)
+#   curl -i http://localhost:8000/api/v1/health/ready # 就绪 (依赖不齐 503)
 
 services:
   # ── LLM 服务 (Ollama, 本地推理) ────────────────────────
@@ -67,7 +68,10 @@ services:
       # 持久化: Chroma 索引 / 评测历史 / 用户反馈
       - app-data:/app/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)"]
+      # 用「就绪」而不是「存活」: 这个 healthcheck 表达的是"这套 stack 现在能不能
+      # 服务"。Ollama 还没拉完模型 / 索引没建好时, app 进程是活的但答不了问题 ——
+      # 此时标记 unhealthy 才是真话。存活探针见 /api/v1/health (恒定 200)。
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 5

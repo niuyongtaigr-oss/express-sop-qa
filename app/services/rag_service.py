@@ -24,6 +24,7 @@ from app.infrastructure.index_manifest import DocFingerprint, IndexManifest
 from app.infrastructure.llm import LLMClient
 from app.infrastructure.reranker import Reranker, create_reranker
 from app.infrastructure.vector_store import RetrievedChunk, VectorStore
+from app.schemas.chat import SourceItem
 
 logger = logging.getLogger(__name__)
 
@@ -358,13 +359,5 @@ class RagService:
 
     @staticmethod
     def _to_sources(chunks: list[dict]) -> list[dict]:
-        return [
-            {
-                "content": c["content"],
-                "doc_id": c.get("metadata", {}).get("doc_id", ""),
-                "title": c.get("metadata", {}).get("title", ""),
-                "tags": c.get("metadata", {}).get("tags", ""),
-                "similarity": round(c["similarity"], 4),
-            }
-            for c in chunks
-        ]
+        # 映射只此一处 (SourceItem.from_chunk) —— 避免两个入口各写一份而悄悄漂移
+        return [SourceItem.from_chunk(c).model_dump() for c in chunks]

@@ -9,6 +9,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 项目根目录 (app/ 的上一级), 用于把相对路径配置解析成绝对路径
@@ -97,9 +98,11 @@ class Settings(BaseSettings):
 
     # ── 细粒度限流/配额 (P3-D) ───────────────────────────
     rate_limit_enabled: bool = False   # 按 Key/IP 限流总开关 (生产开启)
-    rate_limit_per_min: int = 60       # 每 Key 每分钟请求上限
-    rate_limit_burst: int = 20         # 令牌桶突发上限
-    rate_quota_daily: int = 1000       # 每 Key 每日配额
+    # ge=1: 为 0 时令牌永不补充, 且算 Retry-After 时会除零 —— 配置错误必须在
+    # 启动时就报出来, 而不是等到第一个被限流的请求变成 500
+    rate_limit_per_min: int = Field(default=60, ge=1)   # 每 Key 每分钟请求上限
+    rate_limit_burst: int = Field(default=20, ge=1)     # 令牌桶突发上限
+    rate_quota_daily: int = Field(default=1000, ge=0)   # 每 Key 每日配额
 
     # ── 安全 (可选) ──────────────────────────────────────
     # 配置后业务接口必须携带 X-API-Key; 不配置则放行并日志告警 (仅本地开发)
