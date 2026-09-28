@@ -3,7 +3,7 @@
 启动流程 (lifespan):
   1. 初始化结构化日志
   2. 构建 infrastructure 层 (Embedding / LLM / Chroma 向量库)
-  3. 构建 RagService 并加载索引 (已有索引则跳过重建)
+  3. 构建 RagService 并按索引清单增量重建索引 (语料未变则跳过, 见 P1.9)
   4. 装配 LangGraph 编排图 + ChatService (限流/超时降级)
   5. 服务实例挂到 app.state, 由 api/deps.py 注入到路由
 

@@ -1,7 +1,7 @@
 """知识库端点 — /rag/query, /rag/ingest, /rag/docs, /rag/docs/upload
 
 /rag/query:        绕过意图编排, 直接检索 + 生成 (调试/评测用)
-/rag/ingest:       导入默认 SOP 文档 (force=true 清空后重建)
+/rag/ingest:       按清单比对语料, 增量重建索引 (force=true 全量重建) (P1.9)
 /rag/docs:         多文档管理: 清单 / 增量导入 (upsert) / 删除 (P1.6)
 /rag/docs/upload:  上传真实文件 (PDF/Word/Excel/CSV/文本) 解析入库 (P1.7)
 """
@@ -71,7 +71,11 @@ async def rag_ingest(
     force: bool = False,
     rag_service: RagService = Depends(get_rag_service),
 ) -> IngestResponse:
-    """导入默认 SOP 文档。默认幂等 (已有文档则跳过); force=true 清空后重建"""
+    """比对语料清单并重建索引: 默认增量 (只重建变化的文档), force=true 全量重建
+
+    注意: force=true 会先清空再逐篇写入, 期间其他请求可能读到不完整索引 ——
+    建议挑低峰期执行, 详见 README「索引维护与并发约束」。
+    """
     n, rebuilt = await asyncio.to_thread(rag_service.ingest, force)
     return IngestResponse(indexed_chunks=n, rebuilt=rebuilt)
 

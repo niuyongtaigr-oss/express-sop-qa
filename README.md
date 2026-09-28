@@ -64,7 +64,7 @@
 | POST | `/api/v1/chat/feedback` | 用户反馈（1-5 分 + 纠错文本），负面自动告警 | 是* |
 | GET | `/api/v1/chat/feedback/stats` | 反馈统计（均分/负面率/最近低分问题） | 是* |
 | POST | `/api/v1/rag/query` | 知识库直通查询（绕过编排，检索+生成，调试/评测用） | 是* |
-| POST | `/api/v1/rag/ingest` | 导入默认 SOP 文档（默认幂等跳过；`?force=true` 清空重建） | 是* |
+| POST | `/api/v1/rag/ingest` | 按清单比对语料并**增量重建**（`?force=true` 全量重建） | 是* |
 | GET | `/api/v1/rag/docs` | 知识库文档清单（doc_id / title / chunk 数） | 是* |
 | POST | `/api/v1/rag/docs` | 增量导入/覆盖文档（upsert：同 doc_id 旧 chunk 先删后加） | 是* |
 | DELETE | `/api/v1/rag/docs/{doc_id}` | 删除文档及其全部 chunk | 是* |
@@ -219,6 +219,12 @@ curl http://localhost:8000/api/v1/health
   - 默认关闭（`SOP_QA_RERANK_ENABLED=false`）。**这不是"没做"，是实现并测量之后
     按数据做的决定**：在当前语料上重排把 R@1 从 0.70 拉低到 0.60、耗时涨 143 倍，
     详细数据与原因分析见下方「检索效果实测 → 重排到底有没有用」。
+- **P1.9 索引增量重建**：`data/chroma/index_manifest.json` 记录每篇语料的内容 sha1
+  与索引契约（schema 版本 / 分块参数），启动时按指纹对比，**只重建变化的文档**
+  （实测增量 0.5s vs 全量 21.7s）。
+  修掉的是原 `ingest()` 只判 `count() > 0` 带来的三类**静默失败**：元数据结构变了
+  （旧 chunk 缺 `tenant_id` → 被租户过滤器全部排除 → **检索返回空且零报错**）、
+  语料改了、分块参数改了。详见「索引维护与并发约束」。
 - **P2-A LLM-as-Judge**：评测集 `data/eval_cases.json`（期望关键词 + 要求要点）；
   答案质量按忠实性/完整性 LLM 结构化评分，HTTP 后台任务 + CLI 双入口。
 - **P2-A′ 拒答测试**：评测集支持 `expect_refusal: true` 用例——知识库中确实没有答案的
@@ -319,6 +325,60 @@ python3 scripts/run_eval.py --compare-mode      # 临时索引，不污染正式
 > 注意：这是**特定语料上的测量结果，不是普适结论**。换一批语料（比如口语化的
 > 客服对话）数字会变，向量与 BM25 的强弱关系、以及重排是否有效都可能反转。
 > 上面的对照方法与脚本才是可复用的部分。
+
+## 索引维护与并发约束
+
+### 索引何时重建
+
+`data/chroma/index_manifest.json` 是索引的「契约记录」：每篇语料的内容 sha1、
+`SCHEMA_VERSION`、分块参数。启动时 `RagService.ingest()` 按它决定策略：
+
+| 情况 | 行为 |
+|------|------|
+| 无清单（首次启动 / 索引目录被删） | 全量重建 |
+| schema 版本或分块参数变更 | 全量重建 |
+| 某篇语料 sha1 变化 / 新增 | **只重建该篇** |
+| 语料被删除 | 从索引移除该篇 |
+| 集合为空但清单还在（如调过 `/rag/docs` 删除） | 自动补建 |
+| 全部一致 | 跳过，不产生任何写入 |
+
+清单与索引**同目录**，因此删掉 `data/chroma/` 会让两者一起消失、下次自然全量重建
+—— 不会出现「清单说有、索引没有」的错位。
+
+`SCHEMA_VERSION`（[`app/infrastructure/index_manifest.py`](app/infrastructure/index_manifest.py)）
+是手写常量：**改了 chunk 元数据的结构就要 +1**。不做这一步旧 chunk 不会作废，
+而这类不一致是静默的 —— 这正是最初那个 bug 的成因。
+
+### 并发约束：不要用多进程写同一个 Chroma 目录
+
+按 [Chroma 官方文档](https://cookbook.chromadb.dev/core/system_constraints/)：
+
+> Chroma is **thread-safe**
+> Chroma is **not process-safe for concurrent writers sharing the same local persistence path**
+
+本项目的默认部署（`uvicorn app.main:app`，单进程，见 `docker-compose.yml`）满足该约束。
+**以下场景会破坏它：**
+
+- 给 uvicorn 加 `--workers N`
+- 起多个容器副本共用同一个 `data/chroma` 卷
+- **本机同时跑 app 和 `scripts/run_eval.py`** —— 两个进程写同一目录
+
+最后一种最容易发生（开发时几乎必然）。规避方式：跑评测/重建前先停掉 app，
+或给评测用独立的 `SOP_QA_CHROMA_DIR`。
+
+**重建也必须在停止的实例上做。** Chroma 对 rebuild 的要求是
+"Only do this on a stopped Chroma instance"（[Rebuilding Chroma DB](https://cookbook.chromadb.dev/strategies/rebuilding/)）。
+
+### 什么时候需要文件锁（现在还没加）
+
+- **启动路径**：`ingest()` 在 lifespan 的 `yield` **之前**执行，此时应用尚未开始接收
+  请求 —— **没有并发窗口**，不需要锁。
+- **运行时路径**：`POST /rag/ingest?force=true` 会在服务过程中先 `clear_all()` 再逐篇
+  写入，**期间其他请求会拿到不完整结果**。当前靠「挑低峰期执行」规避，没有加锁。
+
+**要多副本 / 多进程时，正确做法是把 Chroma 换成 Client/Server 模式**（`HttpClient` +
+独立 chroma server），把并发交给 server 自己处理。
+**这不是「加个文件锁」能解决的问题** —— Chroma 的嵌入式实现本身就不支持多写者。
 
 ## 测试
 
