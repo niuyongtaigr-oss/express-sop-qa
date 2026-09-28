@@ -42,6 +42,8 @@
   #msg { margin:0 0 16px; padding:10px 12px; border-radius:6px; display:none; white-space:pre-wrap; }
   #msg.ok { display:block; background:#dafbe1; color:var(--ok); }
   #msg.err { display:block; background:#ffebe9; color:var(--danger); }
+  /* 进行中也必须可见: 重建索引/上传解析要等好几秒, 没有反馈用户会以为按钮坏了 */
+  #msg.info { display:block; background:#ddf4ff; color:var(--accent); }
   .stats { display:flex; gap:24px; flex-wrap:wrap; }
   .stats b { font-size:20px; }
   .hint { color:var(--muted); font-size:12px; margin-top:6px; }
@@ -128,7 +130,9 @@ function apiKey() { return sessionStorage.getItem("sop_qa_api_key") || ""; }
 function say(text, kind) {
   const el = $("msg");
   el.textContent = text;                 // textContent: 服务端回显的内容不当作 HTML
-  el.className = kind || "";
+  // 默认 "info" 而不是 "" —— className="" 会命中外层的 display:none, 于是
+  // say("上传解析中…") 这类进行中提示**根本不会显示**, 看起来像按钮没反应
+  el.className = kind || "info";
   if (kind === "ok") setTimeout(() => { el.className = ""; }, 4000);
 }
 

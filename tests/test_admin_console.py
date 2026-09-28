@@ -114,3 +114,16 @@ def test_page_calls_the_documented_endpoints():
                  "/api/v1/rag/docs/formats", "/api/v1/rag/ingest",
                  "/api/v1/chat/feedback/stats"):
         assert f'"{path}"' in page, f"页面没有调用 {path}"
+
+
+def test_in_progress_messages_are_visible():
+    """不带 kind 的提示 (如"上传解析中…") 必须显示得出来
+
+    原先写的是 `el.className = kind || ""` —— className="" 会命中外层 #msg 的
+    display:none, 于是"重建/上传进行中"这类提示**根本不显示**: 用户点完按钮只
+    看到界面没反应, 会以为坏了, 然后重复点击。
+    """
+    text = _body()
+    assert re.search(r"#msg\.info\s*\{[^}]*display:\s*block", text), "缺少可见的 info 样式"
+    assert re.search(r'el\.className\s*=\s*kind\s*\|\|\s*"info"', text), \
+        'say() 的默认状态必须是可见的 "info", 不能是 ""'
