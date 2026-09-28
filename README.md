@@ -142,6 +142,7 @@ data: [DONE]
 - `SOP_QA_MAX_CONCURRENCY` / `SOP_QA_CHAT_TIMEOUT_S`：限流并发数 / 超时秒数
 - `SOP_QA_LLM_TIMEOUT_S`：LLM 单次调用超时，**必须小于 `SOP_QA_CHAT_TIMEOUT_S`**（原因见「安全」）
 - `SOP_QA_MULTI_HOP_MAX_ROUNDS` / `SOP_QA_MULTI_HOP_SIMILARITY_THRESHOLD`：多轮检索参数
+- `SOP_QA_CORS_ALLOW_ORIGINS`：逗号分隔的来源清单，**留空 = 关闭 CORS**（见「安全」）
 - `SOP_QA_EVAL_JUDGE` / `SOP_QA_EVAL_CASES_PATH`：LLM-as-Judge 开关 / 评测集路径
 - `SOP_QA_ENV`：`dev` | `prod`（`prod` 下强制要求访问控制，见「安全」）
 - `SOP_QA_API_KEY`：API Key；`SOP_QA_TENANT_MODE`：多租户模式
@@ -193,6 +194,40 @@ RuntimeError: 生产模式 (SOP_QA_ENV=prod) 必须配置访问控制, 拒绝启
 
 所以 `session_id` 必须由调用方生成成不可猜测的值（建议 UUID4）。
 **若需要用户级隔离，得先引入用户身份概念——当前 API 没有这个维度。**
+
+反馈（`/chat/feedback`）里带 `question` / `answer` 用户原话，与会话历史是同一类
+数据，因此**同样按租户隔离**：统计与低分问题查询都只返回本租户的记录。（更早写入
+的历史记录没有 `tenant_id` 字段，归入 `default` 租户。）
+
+### CORS：默认关闭
+
+`SOP_QA_CORS_ALLOW_ORIGINS` 是逗号分隔的来源清单，**留空即不挂 CORS 中间件**——
+同源部署的前端不需要它，而每多允许一个来源就多一份暴露面。
+
+配置面上**刻意不提供 `allow_credentials` 开关**：本服务用 `X-API-Key` 请求头鉴权，
+不依赖 Cookie，因此不带凭据的通配来源不会把登录态泄漏给任意站点。“通配来源 + 允许
+凭据”是经典错配，把它从配置面上删掉比写一句文档提醒更可靠。若将来改用 Cookie 鉴权，
+必须同时改成显式列出来源。
+
+```
+SOP_QA_CORS_ALLOW_ORIGINS=https://admin.example.com,https://ops.example.com
+```
+
+### 检索分数量纲：不是所有 `similarity` 都能和阈值比
+
+`similarity` 有两种来源，`score_kind` 字段标明是哪一种：
+
+- `cosine` — 向量余弦（`1 - 距离`），与相关度同量纲，**可以**和阈值比较
+- `bm25_norm` — BM25 分数的归一化排名映射，恒落在 `(0.4, 0.9]`，且该模式下的
+  **最高分恒为 0.9**，与真实相关度无关
+
+`multi_hop` 的「命中度够了就提前停止」只认 `cosine`。拿 `bm25_norm` 和阈值比会
+**永远通过**，于是「信息够了才停」退化成「永远停」——而多跳存在的意义正是第一轮
+不够好时补检索。这类分数一律视为「无法判断」，宁可多跑一轮。
+
+另外 `multi_hop` 与**重排**解决的是同一个问题（换 query 再捞 vs 先多取候选再精排），
+因此不叠加：重排开启时 `multi_hop` 只跑一轮，避免 N 次额外 LLM 调用与跨轮
+`rerank_score` 不可比的问题。
 
 ### 超时链路：LLM 必须先于外层超时
 

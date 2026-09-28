@@ -147,3 +147,91 @@ def test_sources_dedupe_keeps_distinct_clauses():
     assert {s["doc_id"] for s in result["sources"]} == {"X", "Y"}
     a = next(s for s in result["sources"] if s["doc_id"] == "X")
     assert a["similarity"] == 0.9                # 留的是高分那次
+
+
+# ── 命中度阈值: 只有向量余弦能与阈值比较 ──────────────────
+# BM25 归一化分是"排名映射": 该模式下的最高分恒为 0.9, 与真实相关度无关。
+# 拿它和阈值比永远通过 → 多跳的"信息够了才停"退化成"永远停"。
+
+from app.agents.nodes import _hit_is_confident, _rank_key  # noqa: E402
+
+
+def _bm25_chunk(sim=0.9):
+    """纯 BM25 / BM25 独有命中: similarity 是归一化排名映射"""
+    return {**CLAUSE_A, "similarity": sim, "score_kind": "bm25_norm"}
+
+
+def test_bm25_top_score_never_counts_as_confident():
+    """BM25 模式下的最高分恒为 0.9, 不能据此认定"信息够了" """
+    settings = make_settings(multi_hop_similarity_threshold=0.6)
+    assert _hit_is_confident(_bm25_chunk(0.9), settings) is False
+
+
+def test_cosine_above_threshold_is_confident():
+    settings = make_settings(multi_hop_similarity_threshold=0.6)
+    assert _hit_is_confident({**CLAUSE_A, "similarity": 0.81,
+                             "score_kind": "cosine"}, settings) is True
+    assert _hit_is_confident({**CLAUSE_A, "similarity": 0.42,
+                             "score_kind": "cosine"}, settings) is False
+
+
+def test_bm25_only_top_hit_does_not_stop_multi_hop():
+    """端到端: 首轮只命中 BM25 分时, 必须继续跑第二轮, 不能提前停"""
+    bm = [_bm25_chunk(0.9)]
+    second = [{**OTHER_DOC, "similarity": 0.5, "score_kind": "cosine"}]
+    rag = RoundRag([bm, second])
+    llm = StubLLM(intent="multi_hop")
+
+    node = make_multi_hop_node(
+        rag, llm,
+        make_settings(multi_hop_max_rounds=2, multi_hop_similarity_threshold=0.6),
+    )
+    result = node({"question": "q", "history": None, "tenant_id": "t"})
+    assert result["rounds"] == 2          # 0.9 是排名假象, 不应据此停止
+
+
+# ── 排序分: 重排开启时以 rerank_score 为准 ────────────────
+
+def test_rank_key_prefers_rerank_score():
+    """similarity 是重排**之前**的分; 排序若还用它, 重排等于没生效"""
+    c = {**CLAUSE_A, "similarity": 0.9,
+         "metadata": {**CLAUSE_A["metadata"], "rerank_score": 1.0}}
+    assert _rank_key(c) == 1.0
+
+
+def test_dedupe_orders_by_rerank_score():
+    low_sim_high_rerank = {
+        **CLAUSE_A, "similarity": 0.2,
+        "metadata": {**CLAUSE_A["metadata"], "rerank_score": 9.0},
+    }
+    high_sim_low_rerank = {
+        **CLAUSE_B, "similarity": 0.95,
+        "metadata": {**CLAUSE_B["metadata"], "rerank_score": 1.0},
+    }
+    ranked = _dedupe_and_rank([high_sim_low_rerank, low_sim_high_rerank])
+    assert [c["metadata"]["rerank_score"] for c in ranked] == [9.0, 1.0]
+
+
+def test_rerank_score_zero_is_respected():
+    """rerank_score=0 是有效分数 (最低), 不能被当成"没有分数"而退回 similarity"""
+    c = {**CLAUSE_A, "similarity": 0.9,
+         "metadata": {**CLAUSE_A["metadata"], "rerank_score": 0.0}}
+    assert _rank_key(c) == 0.0
+
+
+# ── 重排开启时只跑一轮 ───────────────────────────────────
+
+def test_rerank_enabled_limits_multi_hop_to_one_round():
+    """重排与多跳解决同一个问题, 不叠加 —— 否则是 N 次额外 LLM 调用
+    且各轮 rerank_score 跨轮不可比"""
+    rag = RoundRag([[{**CLAUSE_A, "similarity": 0.1}]])   # 低分也不会再跑第二轮
+    llm = StubLLM(intent="multi_hop")
+
+    node = make_multi_hop_node(
+        rag, llm,
+        make_settings(rerank_enabled=True, multi_hop_max_rounds=3,
+                      multi_hop_similarity_threshold=0.6),
+    )
+    result = node({"question": "q", "history": None, "tenant_id": "t"})
+    assert result["rounds"] == 1
+    assert rag._i == 1          # 真的只检索了一次 (不是"轮次字段写 1")

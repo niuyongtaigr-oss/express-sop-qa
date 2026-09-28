@@ -19,9 +19,10 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_v1_router
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import setup_logging
 from app.core.middleware import RequestLoggingMiddleware
@@ -131,6 +132,36 @@ async def lifespan(app: FastAPI):
         logger.info("应用已关闭")
 
 
+def _setup_cors(app: FastAPI, settings: Settings) -> None:
+    """按配置挂载 CORS 中间件 —— 默认**关闭** (同源部署不需要)。
+
+    为什么默认关: CORS 是"允许别的源在浏览器里调用本服务", 每开一个源都是多一份
+    暴露面。同源部署的前端根本不需要它, 所以默认空 = 不挂中间件。
+
+    关于 `*`: 本服务的鉴权走 `X-API-Key` 请求头, 不依赖 Cookie, 因此**不设置
+    allow_credentials** —— 不带凭据时通配源不会把登录态泄漏给任意站点 (第三方
+    页面拿不到用户浏览器里本服务的 localStorage, 也拿不到 API Key)。反过来说,
+    一旦有人想用 Cookie 鉴权, 就必须改成显式列出来源, 所以这里干脆不提供
+    allow_credentials 开关: 把"通配源 + 带凭据"这个经典组合从配置面上删掉, 比写
+    一句文档提醒更可靠。
+    """
+    origins = [o.strip() for o in settings.cors_allow_origins.split(",") if o.strip()]
+    if not origins:
+        return
+    if "*" in origins:
+        logger.warning(
+            "CORS 允许任意来源 (SOP_QA_CORS_ALLOW_ORIGINS=*): 任何网站都能在浏览器里"
+            "调用本服务。生产环境请改为显式列出来源。"
+        )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=False,   # 鉴权走 X-API-Key 请求头, 不用 Cookie
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["*"],       # 需要放行 X-API-Key / Content-Type
+    )
+
+
 def create_app() -> FastAPI:
     """应用工厂 — 创建并装配 FastAPI 实例"""
     app = FastAPI(
@@ -141,6 +172,7 @@ def create_app() -> FastAPI:
     )
     register_exception_handlers(app)
     app.add_middleware(RequestLoggingMiddleware)
+    _setup_cors(app, get_settings())
     app.include_router(api_v1_router)
     return app
 

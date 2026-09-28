@@ -104,6 +104,12 @@ class Settings(BaseSettings):
     rate_limit_burst: int = Field(default=20, ge=1)     # 令牌桶突发上限
     rate_quota_daily: int = Field(default=1000, ge=0)   # 每 Key 每日配额
 
+    # ── CORS (默认关闭) ──────────────────────────────────
+    # 逗号分隔的来源清单, 空 = 不挂 CORS 中间件 (同源部署的前端不需要)。
+    # "*" 表示允许任意来源: 本服务鉴权走 X-API-Key 请求头而非 Cookie, 所以不带
+    # 凭据的通配源不会泄漏登录态, 但生产环境仍建议显式列出来源。
+    cors_allow_origins: str = ""
+
     # ── 安全 (可选) ──────────────────────────────────────
     # 配置后业务接口必须携带 X-API-Key; 不配置则放行并日志告警 (仅本地开发)
     api_key: str | None = None

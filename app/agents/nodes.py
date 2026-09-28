@@ -131,8 +131,21 @@ def _chunk_key(chunk: dict) -> tuple:
     return (doc_id, chunk.get("content", ""))
 
 
+def _rank_key(chunk: dict) -> float:
+    """排序用分数 —— 重排开启时以 LLM 重排分为准。
+
+    `similarity` 是**重排之前**的粗排分: 重排的全部意义就是"粗排分不准, 让 LLM
+    重新判一次"。排序若还按 similarity, 重排结果会被原样撤销 —— 开了重排却完全
+    没生效, 而且没有任何报错。
+    """
+    score = (chunk.get("metadata") or {}).get("rerank_score")
+    if score is not None:
+        return float(score)
+    return float(chunk.get("similarity") or 0.0)
+
+
 def _dedupe_and_rank(chunks: list[dict]) -> list[dict]:
-    """按 chunk 唯一键去重 (保留相似度最高的一份), 再按相似度降序排序。
+    """按 chunk 唯一键去重 (保留排序分最高的一份), 再按排序分降序排序。
 
     排序是必须的: `all_chunks` 是「第一轮全部 + 第二轮全部 + …」的**拼接序**,
     直接截断会让第一轮的低分结果挤掉第二轮的高分结果 —— 而多跳的意义恰恰是
@@ -142,10 +155,26 @@ def _dedupe_and_rank(chunks: list[dict]) -> list[dict]:
     for c in chunks:
         key = _chunk_key(c)
         cur = best.get(key)
-        if cur is None or c.get("similarity", 0.0) > cur.get("similarity", 0.0):
+        if cur is None or _rank_key(c) > _rank_key(cur):
             best[key] = c
     # sorted 稳定: 同分保持轮次原序
-    return sorted(best.values(), key=lambda c: c.get("similarity", 0.0), reverse=True)
+    return sorted(best.values(), key=_rank_key, reverse=True)
+
+
+def _hit_is_confident(chunk: dict, settings: Settings) -> bool:
+    """首轮命中是否"足够好", 可用于提前停止多跳。
+
+    只有**向量余弦**能与阈值同量纲比较。BM25 归一化分 (score_kind="bm25_norm")
+    是"归一化排名映射": 该模式下的最高分恒为 0.9, 与真实相关度无关 —— 拿它和
+    阈值比永远通过, 于是"信息够了才停"退化成"永远停", 而多跳存在的意义正是
+    第一轮不够好时补检索。
+
+    所以这类分数一律视为"无法判断", **不提前停止** (宁可多跑一轮, 也不要因为
+    一个恒定的数字假装自己有把握)。
+    """
+    if chunk.get("score_kind", "cosine") != "cosine":
+        return False
+    return chunk.get("similarity", 0.0) > settings.multi_hop_similarity_threshold
 
 
 def _to_source(chunk: dict) -> dict:
@@ -154,10 +183,16 @@ def _to_source(chunk: dict) -> dict:
 
 
 def make_multi_hop_node(rag_service: RagService, llm: LLMClient, settings: Settings):
-    """多轮检索节点: 检索 → 相似度阈值判断 → LLM 改写 query 再检索 (最多 N 轮)
+    """多轮检索节点: 检索 → 命中度判断 → LLM 改写 query 再检索 (最多 N 轮)
 
-    N 与阈值均走配置; 首轮相似度超过阈值即认为信息足够, 提前停止。
-    改写由 LLM 生成 (RewriteQuery), 若模型判定无需改写则提前停止, 防死循环。
+    N 与阈值均走配置; 首轮命中度超过阈值即认为信息足够, 提前停止 (命中度的量纲
+    判断见 _hit_is_confident)。改写由 LLM 生成 (RewriteQuery), 若模型判定无需
+    改写则提前停止, 防死循环。
+
+    **重排开启时只跑一轮**: 重排走的是"先多取候选 (rerank_candidates) 再让 LLM
+    精排", 与多跳"换 query 再捞一轮"解决的是同一个问题。两者叠加没有叠加收益,
+    却要付出 N 次额外 LLM 调用; 而且各轮的 rerank_score 来自不同候选集, 跨轮不
+    可比, 排序会变成混着两种量纲。所以二选一 —— 重排开着就把预算交给重排。
     """
 
     def multi_hop_node(state: ChatState) -> dict:
@@ -166,14 +201,15 @@ def make_multi_hop_node(rag_service: RagService, llm: LLMClient, settings: Setti
         history = state.get("history")
         tenant_id = state.get("tenant_id", "default")
         rounds = 0
-        for rnd in range(1, settings.multi_hop_max_rounds + 1):
+        max_rounds = 1 if settings.rerank_enabled else settings.multi_hop_max_rounds
+        for rnd in range(1, max_rounds + 1):
             rounds = rnd
             chunks = rag_service.retrieve(query, tenant_id=tenant_id)
             all_chunks.extend(chunks)
             # 命中度足够 → 停止; 否则 LLM 改写 query 再检索一轮
-            if chunks and chunks[0]["similarity"] > settings.multi_hop_similarity_threshold:
+            if chunks and _hit_is_confident(chunks[0], settings):
                 break
-            if rnd == settings.multi_hop_max_rounds:
+            if rnd == max_rounds:
                 break  # 已是最后一轮, 不再改写
             decision = llm.structured_invoke(
                 RewriteQuery,

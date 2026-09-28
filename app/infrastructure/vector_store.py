@@ -35,12 +35,20 @@ _ID_SAFE = re.compile(r"[^A-Za-z0-9_.-]")
 
 @dataclass
 class RetrievedChunk:
-    """检索命中的知识块"""
+    """检索命中的知识块
+
+    `score_kind` 说明 `similarity` 是**哪种分**, 它决定了这个数能不能和阈值直接
+    比较 (见 nodes._is_confident):
+      · "cosine"    — 向量余弦 (1 - 距离), 与相关度同量纲, 可与阈值比较
+      · "bm25_norm" — BM25 分数的**归一化排名映射**, 恒落在 (0.4, 0.9], 且该模式
+                      下的最高分**恒为 0.9**, 与真实相关度无关
+    """
 
     content: str
     metadata: dict = field(default_factory=dict)
     distance: float = 0.0
     similarity: float = 0.0
+    score_kind: str = "cosine"
 
 
 class VectorStore(Protocol):
@@ -252,6 +260,7 @@ class ChromaVectorStore:
                 metadata=self._bm25.metadatas[pos],
                 distance=0.0,
                 similarity=round(0.4 + 0.5 * (score / max_score), 4),
+                score_kind="bm25_norm",
             )
             for pos, score in bm
         ]
@@ -317,6 +326,7 @@ class ChromaVectorStore:
                 metadata=bm_meta.get(content, {}),
                 distance=0.0,
                 similarity=round(0.4 + 0.5 * norm, 4),
+                score_kind="bm25_norm",
             ))
         return merged
 

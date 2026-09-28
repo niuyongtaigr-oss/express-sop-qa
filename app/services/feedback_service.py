@@ -4,8 +4,12 @@
 - 负面反馈 (rating ≤ 2) 打结构化告警日志, 便于人工跟进
 - stats / negative_questions 供统计与评测集扩充素材 (低分问题 → 新评测用例)
 
-线程安全, 保留最近 max_entries 条。
-🏭 Java 对标: 反馈表 + 低分告警 Job
+**按租户隔离**: 每条记录带 tenant_id, stats / negative_questions 只统计本租户。
+原先三者都是全局的 —— 多租户下 A 能看到 B 的低分问题, 而那些 question 是用户
+原话。会话已经按租户隔离了, 反馈是同一类数据, 不能只在会话上做隔离。
+
+线程安全, 保留最近 max_entries 条 (**全局**上限, 见 _load 的说明)。
+🏭 Java 对标: 反馈表 (带 tenant_id) + 低分告警 Job
 """
 
 import json
@@ -13,6 +17,8 @@ import logging
 import threading
 import time
 from pathlib import Path
+
+from app.services.tenant_service import DEFAULT_TENANT
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +52,10 @@ class FeedbackStore:
                 continue
         return entries[-self._max:]
 
-    def append(self, entry: dict) -> int:
-        """写入一条反馈 (含 ts), 返回当前总数; 负面反馈打告警日志"""
+    def append(self, entry: dict, tenant_id: str = DEFAULT_TENANT) -> int:
+        """写入一条反馈 (含 ts 与 tenant_id), 返回当前总数; 负面反馈打告警日志"""
         entry["ts"] = time.time()
+        entry["tenant_id"] = tenant_id or DEFAULT_TENANT
         with self._lock:
             self._entries.append(entry)
             self._entries = self._entries[-self._max:]
@@ -65,8 +72,9 @@ class FeedbackStore:
         rating = entry.get("rating", 0)
         if rating <= 2:
             logger.warning(
-                "feedback_negative rating=%d question=%s comment=%s",
-                rating, entry.get("question", ""), entry.get("comment", ""),
+                "feedback_negative tenant=%s rating=%d question=%s comment=%s",
+                entry["tenant_id"], rating,
+                entry.get("question", ""), entry.get("comment", ""),
             )
         return total
 
@@ -82,13 +90,25 @@ class FeedbackStore:
         except OSError as e:
             logger.warning("feedback 压缩失败: %s", e)
 
-    def stats(self) -> dict:
+    def _of_tenant(self, tenant_id: str) -> list[dict]:
+        """本租户的记录。
+
+        老数据 (本次改动之前写入) 没有 tenant_id 字段 —— 那时只有单租户模式,
+        因此归到 DEFAULT_TENANT。多租户下真实租户 id 来自租户清单, 不会借此
+        看到别的租户。
+        """
+        want = tenant_id or DEFAULT_TENANT
+        return [e for e in self._entries
+                if (e.get("tenant_id") or DEFAULT_TENANT) == want]
+
+    def stats(self, tenant_id: str = DEFAULT_TENANT) -> dict:
         with self._lock:
-            total = len(self._entries)
+            entries = self._of_tenant(tenant_id)
+            total = len(entries)
             if total == 0:
                 return {"total": 0, "avg_rating": None,
                         "negative_count": 0, "negative_rate": 0.0}
-            ratings = [e.get("rating", 0) for e in self._entries]
+            ratings = [e.get("rating", 0) for e in entries]
             negative = sum(1 for r in ratings if r <= 2)
             return {
                 "total": total,
@@ -97,10 +117,11 @@ class FeedbackStore:
                 "negative_rate": round(negative / total, 4),
             }
 
-    def negative_questions(self, limit: int = 10) -> list[dict]:
-        """最近的低分问题 (评测集扩充素材)"""
+    def negative_questions(self, limit: int = 10,
+                           tenant_id: str = DEFAULT_TENANT) -> list[dict]:
+        """本租户最近的低分问题 (评测集扩充素材)"""
         with self._lock:
-            neg = [e for e in self._entries if e.get("rating", 0) <= 2]
+            neg = [e for e in self._of_tenant(tenant_id) if e.get("rating", 0) <= 2]
         neg = neg[-limit:]
         return [
             {

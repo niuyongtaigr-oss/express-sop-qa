@@ -306,6 +306,7 @@ class RagService:
                 "metadata": c.metadata,
                 "distance": c.distance,
                 "similarity": c.similarity,
+                "score_kind": c.score_kind,
             }
             for c in chunks
         ]

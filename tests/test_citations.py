@@ -12,6 +12,7 @@
 from app.agents.nodes import _to_source
 from app.config import Settings
 from app.schemas.chat import SourceItem
+from app.infrastructure.vector_store import RetrievedChunk
 from app.services.rag_service import RagService
 
 
@@ -81,14 +82,11 @@ def test_rag_sources_include_chunk_index_end_to_end():
             return 1
 
         def retrieve(self, query, top_k=3, tenant_id="default"):
-            return [
-                type("C", (), {
-                    "content": _chunk(index=41)["content"],
-                    "metadata": _chunk(index=41)["metadata"],
-                    "distance": 0.2,
-                    "similarity": 0.9,
-                })()
-            ]
+            # 用真实的 RetrievedChunk: 桩自造一个"碰巧字段够用"的对象, 正是
+            # 让这类测试在真实接口变化后仍然全绿的原因
+            return [RetrievedChunk(content=_chunk(index=41)["content"],
+                                   metadata=_chunk(index=41)["metadata"],
+                                   distance=0.2, similarity=0.9)]
 
     class StubLLM:
         def invoke(self, messages):
