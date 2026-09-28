@@ -115,6 +115,15 @@ class Settings(BaseSettings):
         return p if p.is_absolute() else PROJECT_ROOT / p
 
     @property
+    def manifest_path(self) -> Path:
+        """索引清单 (记录每篇语料的指纹, 支撑增量重建)
+
+        放在 Chroma 持久化目录内, 与索引同生命周期 —— 索引目录被删除时清单
+        一起消失, 下次启动自然走全量重建, 不会出现「清单说有、索引没有」。
+        """
+        return self.chroma_path / "index_manifest.json"
+
+    @property
     def chroma_path(self) -> Path:
         p = Path(self.chroma_dir)
         return p if p.is_absolute() else PROJECT_ROOT / p

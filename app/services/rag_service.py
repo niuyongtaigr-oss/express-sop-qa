@@ -20,6 +20,7 @@ from app.infrastructure.document_loader import (
     DocumentLoader,
     create_document_loader,
 )
+from app.infrastructure.index_manifest import DocFingerprint, IndexManifest
 from app.infrastructure.llm import LLMClient
 from app.infrastructure.reranker import Reranker, create_reranker
 from app.infrastructure.vector_store import RetrievedChunk, VectorStore
@@ -90,56 +91,127 @@ class RagService:
         return self._version
 
     # ── 建索引 / 文档管理 ────────────────────────────────
-    def ingest(self, force: bool = False) -> tuple[int, bool]:
-        """导入知识库全部文档: 默认 SOP + data/corpus/ 下的语料文件
+    def _source_documents(self) -> list[tuple[str, str, Path]]:
+        """当前应当被索引的全部源文档: [(doc_id, title, path)]
 
-        已有文档且未指定 force 时跳过 (幂等); force=true 先清空全部文档再导入。
-        返回 (chunk 总数, 是否实际导入)。
-
-        语料文件走**文档解析层**, 与上传路径共用同一套编码识别与文本清洗 ——
-        真实语料同样会有全角空格、异体字符之类的脏数据。
+        默认 SOP + data/corpus/ 下的语料文件。语料目录里每篇一个文档。
         """
-        existing = self._store.count()
-        if existing > 0 and not force:
-            logger.info("索引已存在 (%d chunks), 跳过导入", existing)
-            return existing, False
-        if force and existing > 0:
-            self._store.clear_all()
-
-        total = 0
-        # 1) 默认 SOP 文档
+        sources: list[tuple[str, str, Path]] = []
         sop = self._settings.sop_file
         if sop.exists():
-            text = sop.read_text(encoding="utf-8")
-            total += self._store.add_document(
-                doc_id=self._settings.sop_doc_id,
-                title=sop.stem,
-                text=text,
-                tenant_id=self._settings.shared_tenant_id,  # 默认 SOP 进共享库
-            )
-            logger.info("默认 SOP 导入完成: source=%s", sop)
+            sources.append((self._settings.sop_doc_id, sop.stem, sop))
 
-        # 2) 语料目录 (真实行业资料: 法规 / 规范 / 制度, 每篇一个文档)
         corpus = self._settings.corpus_dir_path
         if corpus.is_dir():
             for path in sorted(corpus.iterdir()):
                 if not path.is_file() or path.name.startswith("."):
                     continue
-                try:
-                    doc = self._loader.load(path.name, path.read_bytes())
-                except Exception as e:  # 单篇失败不拖垮整库导入
-                    logger.warning("语料导入失败, 跳过: %s (%s)", path.name, e)
-                    continue
-                total += self._store.add_document(
-                    doc_id=derive_doc_id(path.name),
-                    title=path.stem,
-                    text=doc.text,
-                    tenant_id=self._settings.shared_tenant_id,
-                )
-                logger.info("语料导入完成: %s (%d 字符)", path.name, len(doc.text))
+                sources.append((derive_doc_id(path.name), path.stem, path))
+        return sources
 
+    def _ingest_one(self, doc_id: str, title: str, path: Path) -> int:
+        """导入单篇源文档 (统一走文档解析层), 返回 chunk 数; 失败返回 0
+
+        注意: 即使是 .txt 也必须走解析层 —— 清洗 (去控制字符 / 合并被字距误判
+        拆开的汉字 / 压缩空白) 是解析层的一部分, 绕过它会静默改变入库文本,
+        进而改变切块结果。语料是纯文本不是跳过解析的理由。
+        """
+        try:
+            doc = self._loader.load(path.name, path.read_bytes())
+        except Exception as e:  # 单篇失败不拖垮整库导入
+            logger.warning("语料导入失败, 跳过: %s (%s)", path.name, e)
+            return 0
+        return self._store.add_document(
+            doc_id=doc_id,
+            title=title,
+            text=doc.text,
+            tenant_id=self._settings.shared_tenant_id,  # 语料进共享库
+        )
+
+    def ingest(self, force: bool = False) -> tuple[int, bool]:
+        """增量导入知识库: 只重建「指纹变了 / 新增 / 删除」的文档
+
+        判定依据是 `data/chroma/index_manifest.json` 里的**文档级指纹**, 而不是
+        「集合里有没有 chunk」。后者会漏掉三类静默失败 (详见 index_manifest 模块
+        的 docstring): 元数据结构变了、语料改了、分块参数改了。
+
+        返回 (chunk 总数, 是否实际发生了写入)。
+
+        force=True 时无条件全量重建 (清单缺失 / 索引契约变更时也走全量)。
+        """
+        sources = self._source_documents()
+        current = IndexManifest.build(
+            [(doc_id, path) for doc_id, _title, path in sources],
+            chunk_size=self._settings.chunk_size,
+            chunk_overlap=self._settings.chunk_overlap,
+        )
+        titles = {doc_id: title for doc_id, title, _p in sources}
+
+        previous = IndexManifest.load(self._settings.manifest_path)
+        existing = self._store.count()
+
+        # 全量重建的三种情形: 显式 force / 无清单 / 索引契约(schema+分块参数)变了
+        if force or previous is None or not previous.contract_matches(
+            self._settings.chunk_size, self._settings.chunk_overlap
+        ):
+            reason = (
+                "force" if force
+                else "无清单" if previous is None
+                else f"索引契约变更 (manifest schema={previous.schema_version}, "
+                     f"chunk={previous.chunk_size}/{previous.chunk_overlap})"
+            )
+            if existing > 0:
+                self._store.clear_all()
+            for doc_id, title, path in sources:
+                n = self._ingest_one(doc_id, title, path)
+                current.docs[doc_id] = DocFingerprint(
+                    sha1=current.docs[doc_id].sha1, chunks=n
+                )
+            current.save(self._settings.manifest_path)
+            self._version += 1
+            total = self._store.count()   # 以索引实际状态为准, 不依赖累加
+            logger.info("知识库全量重建完成: %d chunks, 原因=%s", total, reason)
+            return total, True
+
+        # 增量: 只处理变化的部分
+        rebuild, removed = previous.diff(current)
+        # 集合被清空但清单还在 (例如调过 /rag/docs 删除接口) → 也要补建
+        if existing == 0:
+            rebuild = sorted(current.docs)
+
+        if not rebuild and not removed:
+            logger.info("索引与语料一致 (%d chunks), 跳过导入", existing)
+            return existing, False
+
+        # 未重建的文档沿用上一版清单里的 chunk 数 —— build() 只算语料指纹,
+        # 不知道 chunk 数(索引产物), 不沿用会把它清零, 清单从此与实际不符
+        for doc_id in current.docs:
+            if doc_id not in rebuild and doc_id in previous.docs:
+                current.docs[doc_id] = DocFingerprint(
+                    sha1=current.docs[doc_id].sha1,
+                    chunks=previous.docs[doc_id].chunks,
+                )
+
+        for doc_id in removed:
+            removed_n = self._store.remove_document(
+                doc_id, tenant_id=self._settings.shared_tenant_id
+            )
+            logger.info("语料已删除, 移除索引: doc_id=%s chunks=%d", doc_id, removed_n)
+
+        for doc_id in rebuild:
+            path = next(p for d, _t, p in sources if d == doc_id)
+            n = self._ingest_one(doc_id, titles[doc_id], path)
+            current.docs[doc_id] = DocFingerprint(
+                sha1=current.docs[doc_id].sha1, chunks=n
+            )
+
+        current.save(self._settings.manifest_path)
         self._version += 1
-        logger.info("知识库导入完成: 共 %d chunks (corpus=%s)", total, corpus)
+        total = self._store.count()       # 以索引实际状态为准
+        logger.info(
+            "知识库增量更新完成: 重建 %d 篇 %s, 删除 %d 篇 %s, 共 %d chunks",
+            len(rebuild), rebuild, len(removed), removed, total,
+        )
         return total, True
 
     def add_document(
