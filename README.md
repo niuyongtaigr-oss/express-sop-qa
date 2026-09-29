@@ -85,14 +85,23 @@
 
 | 路径 | 功能 |
 |------|------|
-| `GET /` | 307 → `/admin` |
+| `GET /` | **对话页**（产品本体）：SSE 流式回答 + 可定位引用（文档 · 第 N 段） |
 | `GET /admin` | **极简管理台**：文档清单 / 上传 / 删除 / 重建索引 / 反馈统计 |
 
-管理台是**单文件 HTML，零依赖、无 CDN**（受限网络也能打开），且**自身不持有任何
+两个页面都是**单文件 HTML，零依赖、无 CDN**（受限网络也能打开），且**自身不持有任何
 数据**——没有密钥、没有语料，内容全靠页面里的 JS 实时调同源 API 拉取；访问密钥由
 使用者在页面输入，只存在自己浏览器的 `sessionStorage`（关标签页即消失）。所以页面
-本身可以公开，真正的访问控制仍在 API 层。它与「CORS 默认关闭」是配套的：同源，不
+本身可以公开，真正的访问控制仍在 API 层。它们与「CORS 默认关闭」是配套的：同源，不
 需要开 CORS。
+
+**为什么必须有对话页**：这个项目的产品形态就是问答，但先前只能靠 curl / Swagger 试——
+没有页面，别人无法在两分钟内看到它，而"要配 Ollama、拉 6GB 模型才能看"等于没人会看。
+对话页还顺带解决了 CPU 推理慢（单次 40 秒级）的体感问题：**流式输出让等待可见**。
+
+技术细节：用 `fetch` + `ReadableStream` 手工解析 SSE，而不是 `EventSource`——后者只支持
+GET，而问答要 POST JSON。页面按 `type` 分支处理事件（`intent` / `answer_delta` /
+`sources` / `error` / `done`），**测试会用真实图跑一遍 `stream()` 并要求"服务端发出的
+每种事件，页面都必须有分支"**：漏掉一种不会报错，只会静默少渲染一段内容。
 启用 `SOP_QA_RATE_LIMIT_ENABLED=true` 后，上述业务接口额外按 `X-API-Key`/IP 限流（429 + `Retry-After`）。
 `SOP_QA_RATE_LIMIT_PER_MIN` 必须 ≥1（为 0 会导致令牌永不补充且算 `Retry-After` 时除零）。
 
@@ -276,9 +285,11 @@ cp .env.example .env          # 按需修改
 #   a) 把 .env 里的 SOP_QA_ENV 改成 dev
 #   b) 启动时显式覆盖（推荐，不污染 .env）：
 SOP_QA_ENV=dev uvicorn app.main:app --port 8000        # 或 python3 -m app.main
+# 对话页: http://127.0.0.1:8000/          ← 产品本体, 打开就能问
 # 管理台: http://127.0.0.1:8000/admin
 # 接口文档: http://127.0.0.1:8000/docs
 # 指标: http://127.0.0.1:8000/api/v1/metrics
+# 对话页: http://127.0.0.1:8000/
 # 管理台（上传文档 / 看反馈）: http://127.0.0.1:8000/admin
 # 访问控制状态: http://127.0.0.1:8000/api/v1/health → auth 字段
 # 依赖是否就绪: http://127.0.0.1:8000/api/v1/health/ready (不可用返回 503)
@@ -304,6 +315,7 @@ cp .env.example .env
 echo "SOP_QA_API_KEY=$(openssl rand -hex 24)" >> .env   # 必填, 否则 app 不启动
 docker compose up -d
 # 首次会自动拉取 Ollama 模型 (qwen2.5:7b + bge-m3, 约 6GB), 完成后 app 才启动
+open http://localhost:8000/                          # 对话页: 直接提问
 open http://localhost:8000/admin                     # 管理台: 上传/删除文档, 看反馈
 curl http://localhost:8000/api/v1/health        # 存活: 恒定 200
 curl -i http://localhost:8000/api/v1/health/ready   # 就绪: 依赖不齐返回 503

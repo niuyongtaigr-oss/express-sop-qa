@@ -30,10 +30,16 @@ def test_admin_page_is_served():
     assert "管理台" in r.text
 
 
-def test_root_redirects_to_admin():
-    r = TestClient(HTML).get("/", follow_redirects=False)
-    assert r.status_code in (307, 308)
-    assert r.headers["location"] == "/admin"
+def test_root_now_serves_the_chat_page():
+    """`/` 现在是**对话页**（产品本体），管理台挪到 /admin
+
+    原先 `/` 是 302→/admin；加了对话页之后根路径留给产品本身。
+    """
+    r = TestClient(HTML).get("/")
+    assert r.status_code == 200
+    # 用 <title> 区分两个页面 —— 对话页里也有一个「管理台」链接, 按文字判断会误伤
+    assert "<title>快递 SOP 智能问答</title>" in r.text
+    assert 'href="/admin"' in r.text       # 并且能从对话页跳到管理台
 
 
 def test_admin_is_not_in_openapi_schema():

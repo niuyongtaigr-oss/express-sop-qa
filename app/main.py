@@ -21,7 +21,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse
 
 from app.api.v1.router import api_v1_router
 from app.config import Settings, get_settings
@@ -165,28 +165,37 @@ def _setup_cors(app: FastAPI, settings: Settings) -> None:
     )
 
 
-def _mount_console(app: FastAPI) -> None:
-    """挂载极简管理台 (/admin) —— 单文件 HTML, 无外部依赖。
+def _mount_pages(app: FastAPI) -> None:
+    """挂载两个页面 —— 都是单文件 HTML, 无外部依赖。
+
+      GET /        对话页 (产品本体): 接 /chat/stream, SSE 真流式 + 可定位引用
+      GET /admin   管理台: 文档清单 / 上传 / 删除 / 重建索引 / 反馈统计
+
+    为什么必须有对话页: 这个项目的产品形态就是问答, 但接口只能靠 curl 或 Swagger
+    试。没有页面, 别人(面试官/客户)无法在两分钟内看到它 —— 而"要配 Ollama 拉 6GB
+    模型才能看"等于没人会看。页面本身也解决了 CPU 推理慢的体感问题: 流式输出让
+    等待可见。
+
+    为什么页面本身可以不鉴权: 它们**自身不持有任何数据** —— 没有密钥、没有语料,
+    内容全靠 JS 实时调同源 API; 访问密钥由使用者在页面里输入, 只存在自己浏览器的
+    sessionStorage 里。访问控制仍在 API 层由 verify_api_key 负责 (prod 下未配置会
+    直接拒绝启动)。
+
+    与「CORS 默认关闭」是配套的: 页面与 API 同源, 因此不需要开 CORS。
 
     为什么需要它: `/rag/docs` 这些接口都能用, 但目标用户是企业管理员, 不会用
     curl。缺一个能"看见并操作知识库"的页面, 功能再全也交付不出去。
 
-    为什么页面本身可以不鉴权: 它**自身不持有任何数据** —— 没有密钥、没有语料,
-    内容全靠 JS 实时调同源 API 拉取; 密钥由使用者在页面里输入, 只存在自己浏览器
-    的 sessionStorage 里。所以真正需要管的访问控制仍在 API 层由 verify_api_key
-    负责 (prod 下未配置访问控制会直接拒绝启动)。
-
-    与 CORS 默认关闭是配套的: 页面与 API 同源, 因此不需要开 CORS。
     """
-    html = Path(__file__).resolve().parent / "static" / "admin.html"
+    static = Path(__file__).resolve().parent / "static"
+
+    @app.get("/", include_in_schema=False)
+    async def chat_page() -> FileResponse:
+        return FileResponse(static / "chat.html", media_type="text/html")
 
     @app.get("/admin", include_in_schema=False)
     async def admin_console() -> FileResponse:
-        return FileResponse(html, media_type="text/html")
-
-    @app.get("/", include_in_schema=False)
-    async def root() -> RedirectResponse:
-        return RedirectResponse("/admin")
+        return FileResponse(static / "admin.html", media_type="text/html")
 
 
 def create_app() -> FastAPI:
@@ -200,7 +209,7 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
     app.add_middleware(RequestLoggingMiddleware)
     _setup_cors(app, get_settings())
-    _mount_console(app)
+    _mount_pages(app)
     app.include_router(api_v1_router)
     return app
 
