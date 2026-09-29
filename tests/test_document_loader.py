@@ -367,3 +367,38 @@ def test_ingest_upload_respects_explicit_doc_id_and_tenant():
     out = rag.ingest_upload("a.txt", b"x", doc_id="custom-1", title="自定义", tenant_id="t9")
     assert out["doc_id"] == "custom-1"
     assert store.added[0][3] == "t9"
+
+
+# ── 随仓库发布的演示文档本体 ─────────────────────────────
+# 踩过一次: `data/sop.txt` 被一个无关的 "5467" 前缀污染 (还伴随 CRLF→LF), 而
+# `git add -A` 把它扫进了"只改公司名"的那次提交 —— 提交信息里完全看不出来。
+# 更麻烦的是**任何解析/切块/检索测试都不会发现**: 解析器照常工作, 只是内容多了
+# 4 个字符, 而它会出现在模型的上下文里 ("根据参考文档1中的5467示例快递…")。
+
+def _shipped_demo_doc() -> str:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    return (root / "data" / "sop.txt").read_text(encoding="utf-8")
+
+
+def test_demo_doc_starts_with_its_title():
+    text = _shipped_demo_doc()
+    first = text.splitlines()[0]
+    assert first.startswith("示例快递网点"), f"首行不是标题: {first!r}"
+    assert not first[0].isdigit(), f"首行被无关前缀污染: {first!r}"
+
+
+def test_demo_doc_has_no_digit_runs_before_text():
+    """每行都应以中文/数字序号/空白开头, 不该出现孤立的数字串前缀"""
+    import re
+
+    for line in _shipped_demo_doc().splitlines():
+        assert not re.match(r"^\d{3,}(?=\D)", line), f"疑似被污染的行: {line[:30]!r}"
+
+
+def test_demo_doc_has_no_real_company_name():
+    """演示文档是自拟假数据, 不许出现真实快递公司的名字"""
+    text = _shipped_demo_doc()
+    for name in ("申通", "顺丰", "圆通", "中通", "韵达", "德邦"):
+        assert name not in text, f"演示文档里出现了真实公司名: {name}"
