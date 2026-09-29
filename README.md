@@ -529,6 +529,18 @@ pip install -r requirements-dev.txt
 .venv/bin/python -m pytest tests/ -q     # 无需 Ollama (Stub LLM/向量库驱动)
 ```
 
+全量 **343 个用例**，覆盖分层单元、真实 Chroma 的多租户隔离、真实路由的鉴权/限流
+接线、以及若干"回归守卫"（例如「不许再加回清空全部租户的 API」「装钩子不许改动
+检查脚本」）。多个修复额外做过**变异验证**：把修复逐个改回旧写法，确认对应测试真的
+会变红 —— 测试不会红，就等于没测。
+
+## 联系
+
+- GitHub：[@niuyongtaigr-oss](https://github.com/niuyongtaigr-oss) —— Issue 或私信都可以
+- 提交作者用的是 GitHub 匿名邮箱（`...@users.noreply.github.com`）：这样提交记录里的
+  邮箱不会被爬虫收走，同时仍然正确关联到账号（头像/贡献图都在）。要联系请看上面这个
+  主页，而不是从提交元数据里找邮箱。
+
 ## 隐私自检（本仓库是公开的）
 
 提交过的东西会**永久留在 git 历史里**——要清掉得改写历史 + force push。所以

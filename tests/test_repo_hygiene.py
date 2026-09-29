@@ -372,3 +372,32 @@ def test_installer_refuses_when_checker_is_missing(tmp_path):
     res = _run_installer(tmp_path)
     assert res.returncode != 0
     assert "找不到" in res.stderr
+
+
+def test_email_rule_matches_multi_level_domains_fully():
+    """邮箱正则必须匹配**完整**域名, 不能截断
+
+    原写法 `[\\w-]+\\.[A-Za-z]{2,}` 只支持单级域名, 遇到
+    `users.noreply.github.com` 会截成 `…@users.noreply`, 于是按 endswith 做的
+    白名单判断永远失败 —— 正常文档 (比如 README 里说明匿名邮箱那行) 被误报成泄露。
+    误报会让人开始无视这个检查, 那比漏报还危险。
+    """
+    import re
+
+    from scripts.check_privacy import CONTENT_RULES
+
+    pattern = dict(CONTENT_RULES)["邮箱"]
+    line = "匿名邮箱（`...@users.noreply.github.com`）"
+    matched = pattern.search(line).group(0)
+    assert matched.endswith("users.noreply.github.com"), f"被截断了: {matched!r}"
+
+
+def test_allowlisted_multi_level_email_is_not_flagged(tmp_path):
+    """多级域名的白名单邮箱不该误报; 非白名单的仍要报, 且报的是完整地址"""
+    allowed = _scan_text(tmp_path, "a.txt", "联系 ...@users.noreply.github.com")
+    assert allowed == []
+
+    hit = _scan_text(tmp_path, "b.txt", f"联系 {_FAKE_EMAIL}")
+    assert [h.rule for h in hit] == ["邮箱"]
+    # 长度必须等于完整地址长度, 而不是被截断后的长度
+    assert hit[0].length == len(_FAKE_EMAIL)

@@ -67,7 +67,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # 只描述「类别」, 不含具体值。注意各正则不会匹配到自身源码 (字符类里含 '[' 等)。
 CONTENT_RULES: list[tuple[str, re.Pattern[str]]] = [
     ("手机号", re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")),
-    ("邮箱", re.compile(r"[\w.+-]+@[\w-]+\.[A-Za-z]{2,}")),
+    # 域名部分必须允许**多级**: 「[\w-]+\.[A-Za-z]{2,}」这种写法遇到
+    # users.noreply.github.com 会只匹配到 "…@users.noreply" —— 匹配被截断,
+    # 于是下面按 endswith 做白名单判断永远失败, 把正常文档误报成泄露。
+    ("邮箱", re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}")),
     ("身份证号", re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")),
     ("本地绝对路径", re.compile(r"/home/[A-Za-z0-9_.-]+/|/mnt/[a-z]/|[A-Za-z]:\\\\[Uu]sers\\\\")),
     ("密钥样式", re.compile(
