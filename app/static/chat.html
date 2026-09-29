@@ -311,6 +311,10 @@ for (const q of EXAMPLES) {
 }
 $("key").value = apiKey();
 label();
+
+// ?q=问题 —— 深链: 问题可以直接分享, README 里也能链过来 (顺带让截图能跑真实问答)
+const preset = new URLSearchParams(location.search).get("q");
+if (preset) { $("q").value = preset; send(); }
 </script>
 </body>
 </html>
