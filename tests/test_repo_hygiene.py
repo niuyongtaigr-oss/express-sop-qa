@@ -276,3 +276,32 @@ def test_commit_message_missing_file_is_not_an_error(tmp_path):
     from scripts.check_privacy import scan_commit_message
 
     assert scan_commit_message(tmp_path / "nope") == []
+
+
+def test_identity_hits_reports_content_matches(monkeypatch):
+    """必须测 `identity_hits()` **本身**, 不能只测它内部的小函数
+
+    原先只测 `identity_content_hits` —— 而 CLI (--identities / --history) 用的是
+    `identity_hits()`。把 `hits.extend(identity_content_hits(ident))` 那一行删掉,
+    25 条隐私测试照样全绿, 于是"某个身份里带手机号"再也不会被报出来。
+    """
+    import scripts.check_privacy as cp
+
+    monkeypatch.delenv("SOP_QA_PRIVACY_ALLOWED_IDENTITIES", raising=False)
+    monkeypatch.setattr(
+        cp, "commit_identities",
+        lambda: [(_sample("某人 <", _FAKE_PHONE, "@qq.com>"), 3)],
+    )
+    rules = [h.rule for h in cp.identity_hits()]
+    assert "身份含手机号" in rules
+
+
+def test_identity_hits_surfaces_in_history_scan(monkeypatch):
+    """--history 走的是 scan_history() + identity_hits(), 两者必须真的被合起来"""
+    import scripts.check_privacy as cp
+
+    monkeypatch.setattr(
+        cp, "commit_identities",
+        lambda: [(_sample("某人 <", _FAKE_ID, "@qq.com>"), 1)],
+    )
+    assert cp.identity_hits(), "身份里的身份证号必须被判失败"

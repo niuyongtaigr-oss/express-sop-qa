@@ -9,6 +9,8 @@ X-API-Key 请求头而非 Cookie, 不需要凭据; 把"通配来源 + 允许凭�
 从配置面上删掉, 比写一句文档提醒更可靠。
 """
 
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -118,3 +120,33 @@ def test_create_app_default_has_no_cors(monkeypatch):
     )
     r = TestClient(main_mod.create_app()).get(TRIVIAL, headers={"Origin": ALLOWED})
     assert "access-control-allow-origin" not in r.headers
+
+
+# ── 交付默认值必须在"照文档复制"之后依然成立 ──────────────
+# `.env.example` 里若把示例写在**值为空**的那一行后面, dotenv 不会剥离行内注释:
+#   SOP_QA_CORS_ALLOW_ORIGINS=        # 例: https://admin.example.com
+# 解析出来是 "# 例: https://admin.example.com" —— 一个非空字符串, 于是 CORS 中间件
+# 被挂上了, 而文档承诺的是"留空即关闭"。照文档 `cp .env.example .env` 的人拿到的
+# 就是与文档相反的行为。
+
+ENV_EXAMPLE = Path(__file__).resolve().parent.parent / ".env.example"
+
+
+def test_env_example_has_no_empty_value_with_inline_comment():
+    """整份 .env.example 都不许出现"值为空 + 行内注释" —— 那类默认值全是假的"""
+    from dotenv import dotenv_values
+
+    values = dotenv_values(ENV_EXAMPLE)
+    fake_empty = {k: v for k, v in values.items()
+                  if v is not None and v.lstrip().startswith("#")}
+    assert not fake_empty, f"这些配置项看起来是空的, 其实不是: {fake_empty}"
+
+
+def test_copied_env_example_really_disables_cors():
+    """端到端: 照文档复制 .env.example 之后, CORS 必须真的是关闭的"""
+    settings = Settings(_env_file=ENV_EXAMPLE)
+    assert settings.cors_allow_origins == ""
+
+    app = FastAPI()
+    _setup_cors(app, settings)
+    assert not any("CORSMiddleware" in str(m.cls) for m in app.user_middleware)

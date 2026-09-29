@@ -85,11 +85,19 @@ async def test_chat_metrics_recorded():
 
 @pytest.mark.asyncio
 async def test_degraded_metrics_recorded():
+    """必须断言计数器**真的涨了**
+
+    原先断言 `_line_value(...) is not None` —— 但 chat_degraded_total 是无标签
+    Counter, prometheus_client 在零次自增时也会输出 `chat_degraded_total 0.0`,
+    所以那个断言恒真: 把 `CHAT_DEGRADED.inc()` 整行删掉测试照样绿。
+    无标签指标一律用"前后差值"断言, 不能用"存在性"。
+    """
+    before = _line_value(_text(), "chat_degraded_total ") or 0.0
     svc = ChatService(CountingGraph(degraded=True), SessionStore(), _settings())
     await svc.chat("问题")
     text = _text()
     assert any('intent="degraded"' in line for line in text.splitlines())
-    assert _line_value(text, "chat_degraded_total ") is not None
+    assert _line_value(text, "chat_degraded_total ") == before + 1
 
 
 @pytest.mark.asyncio

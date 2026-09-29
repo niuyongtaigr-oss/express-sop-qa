@@ -330,8 +330,32 @@ def test_ingest_upload_uses_parsed_text_and_derives_id():
     assert out["doc_id"].startswith("doc_")     # 中文名 → 哈希 id
     assert out["title"] == "制度"
     assert out["chunks"] == 3
-    assert out["truncated"] is False
     assert store.added == [(out["doc_id"], "制度", "解析并清洗后的正文", "default")]
+
+
+def test_ingest_upload_propagates_truncated_flag():
+    """truncated 必须来自解析结果
+
+    不能只断言 `out["truncated"] is False` —— 那是"两种实现都成立"的默认值断言:
+    解析器没给 truncated 时它自然也是 False, 于是把透传写成硬编码 False 测试照样绿,
+    而"文件被截断"这个**该报警**的信号就再也传不出来了。
+    """
+    store = _RecordingStore()
+    parsed = ExtractedDocument(text="被截断的正文", metadata={"truncated": True})
+    rag = RagService(store, None, _settings(), document_loader=_StubLoader(parsed))
+
+    assert rag.ingest_upload("大文件.txt", b"x")["truncated"] is True
+
+    store2 = _RecordingStore()
+    ok = ExtractedDocument(text="完整正文", metadata={"truncated": False})
+    rag2 = RagService(store2, None, _settings(), document_loader=_StubLoader(ok))
+    assert rag2.ingest_upload("小文件.txt", b"x")["truncated"] is False
+
+    # 解析器完全没提 truncated 时按"未截断"处理
+    store3 = _RecordingStore()
+    silent = ExtractedDocument(text="正文", metadata={})
+    rag3 = RagService(store3, None, _settings(), document_loader=_StubLoader(silent))
+    assert rag3.ingest_upload("a.txt", b"x")["truncated"] is False
 
 
 def test_ingest_upload_respects_explicit_doc_id_and_tenant():

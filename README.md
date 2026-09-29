@@ -8,7 +8,8 @@
 ```
                 ┌────────────── FastAPI (app/main.py) ──────────────┐
                 │        所有业务接口挂在 /api/v1 前缀下             │
-                │  /health /chat /chat/stream /rag/* /eval/*         │
+                │  /health[/ready] /metrics /chat[/stream|/feedback]  │
+                │  /rag/* /eval/*                                    │
                 └───────────────┬────────────────────────────────────┘
               core/ 横切层: 结构化 JSON 日志 + trace_id │ 请求日志中间件
                           统一异常处理 │ X-API-Key 鉴权 (可选)
@@ -45,7 +46,7 @@
 | `app/main.py` | 应用工厂 `create_app()` + lifespan（启动时建/加载索引） |
 | `app/config.py` | pydantic-settings 集中配置，环境变量前缀 `SOP_QA_`，仓库零密钥 |
 | `app/core/` | 横切关注点：结构化日志+trace_id、统一异常、请求日志中间件、API Key 鉴权 |
-| `app/schemas/` | Pydantic DTO，按资源分文件（chat/rag/eval/common） |
+| `app/schemas/` | Pydantic DTO，按资源分文件（chat/rag/eval/feedback/common） |
 | `app/infrastructure/` | 外部系统适配层：LLM / Embedding / 向量库 / 文档解析，Protocol 抽象 + 工厂 |
 | `app/services/` | 业务逻辑层：RAG 服务、问答编排（限流/超时降级）、检索评测 |
 | `app/agents/` | LangGraph 编排：ChatState、节点工厂、图装配（依赖注入，无全局单例） |
@@ -74,13 +75,17 @@
 | POST | `/api/v1/eval/run` | 提交评测（检索命中率 + LLM-as-Judge 答案质量 + 拒答准确率），后台任务返回 task_id | 是* |
 | GET | `/api/v1/eval/tasks/{task_id}` | 轮询评测结果（hit_rate/拒答准确率/忠实性/完整性 + 回归对比 compare） | 是* |
 
-\* 配置了 `SOP_QA_API_KEY` 时需携带 `X-API-Key` 请求头；未配置则放行并日志告警（仅本地开发）。
+\* 访问控制的三种情形：
+- `SOP_QA_ENV=prod`（**容器部署的默认值**）：未配置访问控制则**拒绝启动**，不是告警放行
+- `SOP_QA_ENV=dev` 且未配置 `SOP_QA_API_KEY`：放行并日志告警（仅限本地开发）
+- `SOP_QA_TENANT_MODE=true`：`SOP_QA_API_KEY` **被忽略**，`X-API-Key` 必须能映射到
+  `data/tenants.json` 里的某个租户，否则 401
 
 页面（不在 `/api/v1` 前缀下，也不出现在 `/docs` 接口清单里）：
 
 | 路径 | 功能 |
 |------|------|
-| `GET /` | 302 → `/admin` |
+| `GET /` | 307 → `/admin` |
 | `GET /admin` | **极简管理台**：文档清单 / 上传 / 删除 / 重建索引 / 反馈统计 |
 
 管理台是**单文件 HTML，零依赖、无 CDN**（受限网络也能打开），且**自身不持有任何
@@ -98,8 +103,10 @@
 curl -X POST http://127.0.0.1:8000/api/v1/chat \
   -H 'Content-Type: application/json' \
   -d '{"question": "包裹破损了怎么申请理赔?", "session_id": "sess-001"}'
-# → {"answer": "...", "intent": "rag_qa", "sources": [{"content","doc_id","title","tags","similarity"}],
-#    "trace_id": "...", "elapsed_ms": 123, "session_id": "sess-001"}
+# → {"answer": "...", "intent": "rag_qa",
+#    "sources": [{"content","doc_id","title","tags","chunk_index","similarity"}],
+#    "trace_id": "...", "elapsed_ms": 123, "session_id": "sess-001", "cached": false}
+#   chunk_index 让引用**可定位**：能跳到原文对应段落，也能核对模型是否真的引用了这一段
 
 # 知识库直通
 curl -X POST http://127.0.0.1:8000/api/v1/rag/query \
@@ -152,8 +159,11 @@ data: [DONE]
 - `SOP_QA_SESSION_TTL_S` / `SOP_QA_SESSION_MAX_TURNS`：会话记忆过期时间 / 最大轮数
 - `SOP_QA_CACHE_ENABLED` / `SOP_QA_CACHE_TTL_S`：无会话答案缓存开关 / 过期秒数
 - `SOP_QA_RATE_LIMIT_ENABLED` / `SOP_QA_RATE_LIMIT_PER_MIN`(≥1) / `SOP_QA_RATE_LIMIT_BURST` / `SOP_QA_RATE_QUOTA_DAILY`：按 Key 限流/配额
+- `SOP_QA_RATE_LIMIT_MAX_KEYS`(≥1)：限流器的内存上界（令牌桶数；当日记账表为其 4 倍）。
+  触顶时会告警并**拒绝新 Key**（fail-closed），按告警调大这个值即可
 - `SOP_QA_MAX_CONCURRENCY` / `SOP_QA_CHAT_TIMEOUT_S`：限流并发数 / 超时秒数
-- `SOP_QA_LLM_TIMEOUT_S`：LLM 单次调用超时，**必须小于 `SOP_QA_CHAT_TIMEOUT_S`**（原因见「安全」）
+- `SOP_QA_LLM_TIMEOUT_S`：LLM 单次调用超时，**应当**小于 `SOP_QA_CHAT_TIMEOUT_S`
+  （这条**不会被强制**：配反了只在启动时打一条 warning，原因见「安全」）
 - `SOP_QA_MULTI_HOP_MAX_ROUNDS` / `SOP_QA_MULTI_HOP_SIMILARITY_THRESHOLD`：多轮检索参数
 - `SOP_QA_CORS_ALLOW_ORIGINS`：逗号分隔的来源清单，**留空 = 关闭 CORS**（见「安全」）
 - `SOP_QA_EVAL_JUDGE` / `SOP_QA_EVAL_CASES_PATH`：LLM-as-Judge 开关 / 评测集路径
@@ -284,7 +294,14 @@ python3 scripts/run_eval.py --compare-mode     # hybrid vs vector 对比
 
 ## Docker 部署 (P3-E)
 
+> ⚠️ **先设 `SOP_QA_API_KEY`，否则 app 起不来。** compose 的默认值是
+> `SOP_QA_ENV=prod`，而 prod 下没有访问控制会**拒绝启动**（这是有意的 fail-closed）。
+> 新克隆的仓库直接 `docker compose up -d` 会让 app 容器反复重启，日志里是
+> 「生产模式 (SOP_QA_ENV=prod) 必须配置访问控制, 拒绝启动」。
+
 ```bash
+cp .env.example .env
+echo "SOP_QA_API_KEY=$(openssl rand -hex 24)" >> .env   # 必填, 否则 app 不启动
 docker compose up -d
 # 首次会自动拉取 Ollama 模型 (qwen2.5:7b + bge-m3, 约 6GB), 完成后 app 才启动
 open http://localhost:8000/admin                     # 管理台: 上传/删除文档, 看反馈

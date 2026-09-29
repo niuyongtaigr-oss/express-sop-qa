@@ -92,8 +92,9 @@ def test_rag_sources_include_chunk_index_end_to_end():
         def invoke(self, messages):
             return "依据第二十八条……"
 
+    # RagService 没有 _ready 属性 —— ready 是 StubStore.count() 之上的 property,
+    # 所以不需要(也不能)手工"跳过 ingest"
     rag = RagService(StubStore(), StubLLM(), Settings(_env_file=None))
-    rag._ready = True                      # 跳过 ingest, 本测试只关心映射
     sources = rag.ask("罚款多少")["sources"]
 
     assert sources[0]["chunk_index"] == 41
