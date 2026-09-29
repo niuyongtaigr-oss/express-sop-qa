@@ -15,6 +15,7 @@
 import argparse
 import json
 import sys
+import contextlib
 import tempfile
 from pathlib import Path
 
@@ -129,6 +130,44 @@ def _scan_top_k(settings, embeddings, llm, csv: str) -> None:
 RECALL_KS = (1, 3, 5, 10)
 
 
+@contextlib.contextmanager
+def _temp_index(settings, embeddings, mode: str, rerank: bool):
+    """开一份临时索引, 并交出**与它同目录**的配置。
+
+    目录和 manifest 必须一起创建: 分成两步写的话, 调用方很容易只换 store 的
+    persist_dir 而让 manifest 留在正式索引那边 (这正是原先的 bug)。绑成一个
+    上下文管理器之后, 这类错误在调用点**没有机会发生**。
+    """
+    with tempfile.TemporaryDirectory(prefix="sopqa-cmp-") as d:
+        store = ChromaVectorStore(
+            persist_dir=d,
+            collection_name=settings.collection_name,
+            embeddings=embeddings,
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+            retrieval_mode=mode,
+        )
+        yield store, _temp_index_settings(settings, d, rerank)
+
+
+def _temp_index_settings(settings, chroma_dir, rerank: bool):
+    """临时索引用一份**连 chroma_dir 一起换掉**的配置。
+
+    这里踩过一个静默的坑: 原先只换了 store 的 persist_dir, 而 manifest 的位置是从
+    `settings.chroma_dir` 推出来的 —— 于是 force 重建把**新语料的指纹**写进了
+    `data/chroma/index_manifest.json`, chunk 却落在临时目录。真实索引还留着旧内容,
+    清单却说"已是最新", 下次 `ingest()` 判定无变化 → **真实索引永久静默陈旧**,
+    而且没有任何报错。这正是清单机制本来要防的那类失败, 被"复用了同一份 settings"
+    重新引入。
+
+    所以临时索引必须把 manifest 一起搬走 —— 清单和它描述的那份索引永远同目录。
+    """
+    updates = {"rerank_enabled": rerank}
+    if chroma_dir is not None:
+        updates["chroma_dir"] = chroma_dir
+    return settings.model_copy(update=updates)
+
+
 def _recall_at_k(rag, cases: list[dict]) -> dict[str, float]:
     """对每个 k 统计「前 k 条里含期望关键词」的比例 (Recall@k)。
 
@@ -158,7 +197,6 @@ def _compare_modes(settings, embeddings, llm, top_k, rerank: bool = False) -> No
 
     rerank=True 时同时启用精排, 可直接对照「重排把低 k 精度抬了多少」。
     """
-    mode_settings = settings.model_copy(update={"rerank_enabled": rerank})
     tag = " + 精排(LLM rerank)" if rerank else " (仅粗排)"
     print(f"🆚 检索模式对比{tag} — 临时索引, 语料为 data/corpus/\n")
 
@@ -171,16 +209,8 @@ def _compare_modes(settings, embeddings, llm, top_k, rerank: bool = False) -> No
     print(header)
     print("  " + "-" * (len(header) - 2))
     for mode in ("hybrid", "vector", "bm25"):
-        with tempfile.TemporaryDirectory(prefix="sopqa-cmp-") as d:
-            store = ChromaVectorStore(
-                persist_dir=d,
-                collection_name=settings.collection_name,
-                embeddings=embeddings,
-                chunk_size=settings.chunk_size,
-                chunk_overlap=settings.chunk_overlap,
-                retrieval_mode=mode,
-            )
-            rag = RagService(store, llm, mode_settings)
+        with _temp_index(settings, embeddings, mode, rerank) as (store, cfg):
+            rag = RagService(store, llm, cfg)
             n, _ = rag.ingest(force=True)
             recall = _recall_at_k(rag, cases)
             print(f"  {mode:<8}{n:<9}" + "".join(

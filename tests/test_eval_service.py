@@ -276,3 +276,79 @@ def test_api_dto_accepts_refusal_detail(tmp_path):
     retrieval = [d for d in resp.details if d.kind == "retrieval"][0]
     assert retrieval.hit is not None
     assert retrieval.refused is None
+
+
+# ── 临时索引必须连 manifest 一起搬走 ─────────────────────
+# 踩过的坑 (`scripts/run_eval.py --compare-mode`): 只换了 store 的 persist_dir, 而
+# manifest 的位置是从 settings.chroma_dir 推出来的 —— 于是 force 重建把**新语料的
+# 指纹**写进了正式索引的 manifest, chunk 却落在临时目录。正式索引还留着旧内容,
+# 清单却说"已是最新", 下次 ingest() 判定无变化 → **正式索引永久静默陈旧**。
+# 这正是清单机制本来要防的那类失败。
+
+def test_temp_index_settings_moves_manifest_together(tmp_path):
+    """临时索引的 manifest 必须落在临时目录里, 且不动正式索引的清单"""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    from run_eval import _temp_index_settings
+
+    real = Settings(_env_file=None, chroma_dir=str(tmp_path / "real"))
+    real_manifest = real.manifest_path
+
+    for rerank in (False, True):
+        tmp_cfg = _temp_index_settings(real, "/tmp/sopqa-cmp-xyz", rerank)
+        assert tmp_cfg.rerank_enabled is rerank
+        # manifest 跟着临时目录走
+        assert str(tmp_cfg.manifest_path).startswith("/tmp/sopqa-cmp-xyz")
+        assert tmp_cfg.manifest_path != real_manifest
+        # 正式配置没被改动
+        assert real.manifest_path == real_manifest
+        assert real.chroma_dir.endswith("real")
+        assert real.rerank_enabled is False
+
+
+def test_temp_index_context_keeps_manifest_with_the_index(tmp_path):
+    """上下文管理器交出的配置, manifest 必须落在临时索引目录里
+
+    这条守的是**调用点**: 只测 `_temp_index_settings` 的话, `_compare_mode` 里忘了
+    把临时目录传进去 (原缺陷) 测试照样绿。改成上下文管理器后目录与配置由同一个
+    对象交出, 那个错误在调用点已经写不出来了。
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    from run_eval import _temp_index
+
+    class _NoEmbed:
+        def embed(self, texts):
+            return [[1.0, 0.0] for _ in texts]
+
+    real = Settings(_env_file=None, chroma_dir=str(tmp_path / "real"))
+    real_manifest = real.manifest_path
+
+    with _temp_index(real, _NoEmbed(), "vector", False) as (store, cfg):
+        assert cfg.manifest_path != real_manifest
+        assert str(cfg.manifest_path).startswith(cfg.chroma_dir)
+        assert cfg.rerank_enabled is False
+        assert store.count() == 0            # 临时索引是空的
+
+    # 正式配置与正式清单全程未被改动
+    assert real.chroma_dir.endswith("real")
+    assert real.manifest_path == real_manifest
+    assert not real_manifest.exists()
+
+
+def test_temp_index_settings_without_dir_only_changes_rerank(tmp_path):
+    """不传目录时只改 rerank, manifest 位置保持不动"""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    from run_eval import _temp_index_settings
+
+    real = Settings(_env_file=None, chroma_dir=str(tmp_path / "real"))
+    cfg = _temp_index_settings(real, None, True)
+    assert cfg.rerank_enabled is True
+    assert cfg.manifest_path == real.manifest_path

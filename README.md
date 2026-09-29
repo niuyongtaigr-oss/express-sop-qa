@@ -52,7 +52,7 @@
 | `app/agents/` | LangGraph 编排：ChatState、节点工厂、图装配（依赖注入，无全局单例） |
 | `app/api/` | HTTP 层：依赖注入 + 版本化路由 `/api/v1` |
 | `scripts/run_eval.py` | 命令行评测入口（不启动 HTTP） |
-| `data/` | `corpus/` 真实语料（法规/规范，每篇一个文档）· `sop.txt` 演示文档 · `chroma/` Chroma 运行时产物（gitignore） |
+| `data/` | `corpus/` 真实语料（法规/规范，每篇一个文档）· `sop.txt` 演示文档（自拟假数据，非任何公司真实制度）· `chroma/` Chroma 运行时产物（gitignore） |
 
 ## 接口清单（前缀 `/api/v1`）
 
@@ -138,7 +138,7 @@ curl http://127.0.0.1:8000/api/v1/eval/tasks/<task_id>    # → {"status": "done
 ```
 data: {"type": "intent", "intent": "rag_qa", "reason": "..."}
 data: {"type": "answer_delta", "delta": "根据"}      # 若干条 token 增量
-data: {"type": "answer_delta", "delta": "申通..."}
+data: {"type": "answer_delta", "delta": "示例..."}
 data: {"type": "sources", "sources": [...], "rounds": 1}   # multi_hop 时有 rounds
 data: {"type": "done", "trace_id": "...", "intent": "rag_qa"}
 data: [DONE]
@@ -395,6 +395,10 @@ curl -i http://localhost:8000/api/v1/health/ready   # 就绪: 依赖不齐返回
 |------|------|------|
 | `快递暂行条例.txt` | 国务院令第 697 号，2018-05-01 施行 | 8 章 48 条 |
 | `快递市场管理办法.txt` | 交通运输部令 2023 年第 22 号，2024-03-01 施行 | 9 章 57 条 |
+
+`data/sop.txt` 是**为演示自拟**的假 SOP —— 连同其中的公司名都是占位名，
+**不含任何真实企业的内部制度**。有真实法规语料之后它只作为小体量的演示样本保留
+（2 个 chunk）。
 
 合计约 1.4 万字，切块后 **91 个 chunk**（原先的演示文档只有 2 个）。选法律法规
 作为语料的原因：**真实、权威、且不受著作权保护**（《著作权法》第五条规定法律、
