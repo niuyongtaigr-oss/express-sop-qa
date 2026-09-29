@@ -305,3 +305,70 @@ def test_identity_hits_surfaces_in_history_scan(monkeypatch):
         lambda: [(_sample("某人 <", _FAKE_ID, "@qq.com>"), 1)],
     )
     assert cp.identity_hits(), "身份里的身份证号必须被判失败"
+
+
+# ── 钩子安装脚本 ─────────────────────────────────────────
+# 这里踩过一次真坑: 老文档让人把钩子做成软链 (`ln -sf ... .git/hooks/pre-commit`),
+# 而安装脚本用 `> "$target"` 写入 —— 对软链会**沿着软链写**, 把被指向的
+# scripts/check_privacy.py 覆盖成钩子内容; 钩子又去 exec 它自己 → 无限递归卡死。
+# 所以必须有测试守住"装钩子绝不改动检查脚本"。
+
+import subprocess
+
+
+def _run_installer(repo: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["bash", str(PROJECT_ROOT / "scripts" / "install_git_hooks.sh")],
+        cwd=repo, capture_output=True, text=True, timeout=60,
+    )
+
+
+def _init_repo(repo: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / "scripts").mkdir(exist_ok=True)
+    src = PROJECT_ROOT / "scripts" / "check_privacy.py"
+    (repo / "scripts" / "check_privacy.py").write_text(
+        src.read_text(encoding="utf-8"), encoding="utf-8")
+    (repo / "scripts" / "install_git_hooks.sh").write_text(
+        (PROJECT_ROOT / "scripts" / "install_git_hooks.sh").read_text(encoding="utf-8"),
+        encoding="utf-8")
+
+
+def test_installer_replaces_symlinked_hook_without_touching_the_checker(tmp_path):
+    """已有软链钩子时, 安装脚本必须删软链建新文件, 不能写穿软链"""
+    _init_repo(tmp_path)
+    checker = tmp_path / "scripts" / "check_privacy.py"
+    before = checker.read_text(encoding="utf-8")
+
+    hooks = tmp_path / ".git" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    (hooks / "pre-commit").symlink_to("../../scripts/check_privacy.py")
+
+    res = _run_installer(tmp_path)
+    assert res.returncode == 0, res.stderr
+
+    assert checker.read_text(encoding="utf-8") == before, "检查脚本被写穿了!"
+    hook = hooks / "pre-commit"
+    assert hook.is_file() and not hook.is_symlink()
+    assert "--staged" in hook.read_text(encoding="utf-8")
+
+
+def test_installer_writes_both_hooks_that_forward_arguments(tmp_path):
+    """commit-msg 必须把 $1 转发给检查脚本 (软链做不到这件事)"""
+    _init_repo(tmp_path)
+    assert _run_installer(tmp_path).returncode == 0
+
+    msg_hook = (tmp_path / ".git" / "hooks" / "commit-msg").read_text(encoding="utf-8")
+    assert "--commit-msg" in msg_hook
+    assert '"$1"' in msg_hook
+
+    pre = (tmp_path / ".git" / "hooks" / "pre-commit").read_text(encoding="utf-8")
+    assert "--staged" in pre
+    assert "$1" not in pre
+
+
+def test_installer_refuses_when_checker_is_missing(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    res = _run_installer(tmp_path)
+    assert res.returncode != 0
+    assert "找不到" in res.stderr

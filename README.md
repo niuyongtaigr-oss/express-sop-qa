@@ -537,9 +537,17 @@ python3 scripts/check_privacy.py --history     # 全部提交历史（message + 
 python3 scripts/check_privacy.py --identities  # 只看提交作者身份（会公开显示的那个字段）
 python3 scripts/check_privacy.py --list-rules  # 打印当前生效的规则
 
-# 装成 pre-commit 钩子（推荐）
-ln -sf ../../scripts/check_privacy.py .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# 装成钩子（推荐, 两个都装）—— 用安装脚本, **不要用 ln -sf 软链**
+scripts/install_git_hooks.sh
 ```
+
+为什么不给 `ln -sf` 命令（这坑真踩过）：git 调 `commit-msg` 钩子时会把**提交信息
+文件的路径**作为 `$1` 传进来，而 `check_privacy.py` 用的是 argparse —— 软链过去的
+脚本会把这个位置参数当成无法识别的参数，直接退出 2，**每一次提交都被拦死**；
+`pre-commit` 用软链也传不了 `--staged`。而且老版安装方式还有第二个坑：如果
+`.git/hooks/pre-commit` 已经是指向检查脚本的软链，`> "$target"` 会**沿着软链写**，
+把 `check_privacy.py` 本身覆盖掉。安装脚本会先 unlink 再写，并在结束时校验检查脚本
+仍然完好。这两点都有回归测试（`tests/test_repo_hygiene.py` 里用临时仓库跑一遍安装）。
 
 `tests/test_repo_hygiene.py` 会在每次 pytest 时跑同一套检查，CI 也能拦住。
 

@@ -24,8 +24,11 @@ force push)。所以把「不要带私密信息进去」做成可执行的检查
 message/diff/路径, 完全没看这个字段。
 
 装成钩子 (推荐**两个都装**):
-  ln -sf ../../scripts/check_privacy.py .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
-  ln -sf ../../scripts/check_privacy.py .git/hooks/commit-msg && chmod +x .git/hooks/commit-msg
+# 装成钩子 —— **不要用 ln -sf 软链**, 用安装脚本:
+#   scripts/install_git_hooks.sh
+# 为什么不能用软链: git 调 commit-msg 钩子时会把"提交信息文件路径"作为 $1 传进来,
+# 软链过去的本脚本用的是 argparse, 收到这个位置参数会报错退出 2 —— 结果是**每一次
+# 提交都被拦死**; pre-commit 也一样传不了 --staged。安装脚本写的是转发脚本。
 
 为什么 commit-msg 也要装: `--staged` 看的是**暂存的文件内容**, 而提交信息不在暂存
 区里 —— 只看暂存区就完全拦不住"代码没问题、但提交信息里写了敏感词"。本仓库真的
