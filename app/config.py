@@ -9,11 +9,16 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 项目根目录 (app/ 的上一级), 用于把相对路径配置解析成绝对路径
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# 允许的 env 取值。只放这两个 —— 多一个别名就多一条"以为自己是生产、其实是
+# 开发"的路径。(放模块级而不是类属性: 类里带下划线的名字会被 pydantic 当作
+# private attr, 不能在 validator 里当普通元组用。)
+ENV_VALUES = ("dev", "prod")
 
 
 class Settings(BaseSettings):
@@ -26,10 +31,32 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    @field_validator("env", mode="after")
+    @classmethod
+    def _normalize_env(cls, v: str) -> str:
+        """归一化 + 校验 env 取值 (大小写/空白宽容, 拼错则拒绝启动)
+
+        `PROD` / ` prod ` 归一成 `prod` (环境变量写成大写很常见);
+        但 `Production` / `prd` / 空串一律**报错**, 而不是当作 dev 放行。
+        """
+        normalized = (v or "").strip().lower()
+        if normalized not in ENV_VALUES:
+            raise ValueError(
+                f"env 取值非法: {v!r}。只接受 {ENV_VALUES[0]} 或 "
+                f"{ENV_VALUES[1]} (大小写与首尾空白不敏感)。"
+                f"注意: 拼错会被当成开发模式, 从而跳过生产环境的访问控制自检。"
+            )
+        return normalized
+
     # ── 应用 ────────────────────────────────────────────
     log_level: str = "INFO"
     # dev | prod。prod 下启动自检会强制要求访问控制, 未配置则拒绝启动 ——
     # 默认 fail-open 对企业知识库不可接受 (详见 core/security.assert_secure_settings)
+    #
+    # **取值必须校验**: 启动自检只认精确的 "prod", 所以 `Production` / `prd` /
+    # 空串这类拼写会静默落进 dev 分支, 把一个 fail-closed 的安全闸门变成 fail-open。
+    # 校验放在 Settings 上而不是 assert_secure_settings 里, 是为了让拼错在**构造
+    # 配置时**就报错 —— 那比"启动后才发现自己没被保护"早得多。
     env: str = "dev"
 
     # ── Ollama / 模型 ────────────────────────────────────
@@ -103,6 +130,9 @@ class Settings(BaseSettings):
     rate_limit_per_min: int = Field(default=60, ge=1)   # 每 Key 每分钟请求上限
     rate_limit_burst: int = Field(default=20, ge=1)     # 令牌桶突发上限
     rate_quota_daily: int = Field(default=1000, ge=0)   # 每 Key 每日配额
+    # 限流器内存上界 (令牌桶数 = max_keys, 当日记账表 = 4×max_keys)。
+    # 必须可配置: 触发上界时的告警会让运维调大它 —— 调不了的告警等于没有告警。
+    rate_limit_max_keys: int = Field(default=10000, ge=1)
 
     # ── CORS (默认关闭) ──────────────────────────────────
     # 逗号分隔的来源清单, 空 = 不挂 CORS 中间件 (同源部署的前端不需要)。

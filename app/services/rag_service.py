@@ -161,8 +161,11 @@ class RagService:
                 else f"索引契约变更 (manifest schema={previous.schema_version}, "
                      f"chunk={previous.chunk_size}/{previous.chunk_overlap})"
             )
+            # 只删**共享库** (语料所在的租户), 不能清空整个集合 —— 集合是各租户
+            # 共用的, 清空会把别的租户上传的文档一起删掉。全量重建是部署动作,
+            # 不该变成"把所有人的知识库清空"。
             if existing > 0:
-                self._store.clear_all()
+                self._store.remove_tenant(self._settings.shared_tenant_id)
             for doc_id, title, path in sources:
                 n = self._ingest_one(doc_id, title, path)
                 current.docs[doc_id] = DocFingerprint(

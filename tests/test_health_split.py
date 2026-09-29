@@ -108,3 +108,38 @@ def test_readiness_lists_all_reasons_not_just_the_first():
     c = _client(rag=StubRag(ready=False, chunks=0), probe=DownProbe())
     reasons = c.get("/api/v1/health/ready").json()["reasons"]
     assert len(reasons) == 2
+
+
+# ── 指标刷新: 只挂 liveness 的部署也要拿得到 kb_chunks ────
+# 拆分前 /health 每次都刷新这两个 Gauge; 拆分后如果只在 ready 里写, 那么只配
+# liveness 探针的部署 (K8s 的典型用法) 会看到 ollama_up / kb_chunks 恒为 0。
+
+def _gauge(name: str) -> float:
+    from prometheus_client import generate_latest
+    for line in generate_latest().decode("utf-8").splitlines():
+        if line.startswith(name + " "):
+            return float(line.split()[-1])
+    raise AssertionError(f"指标不存在: {name}")
+
+
+def test_liveness_refreshes_kb_chunks():
+    """kb_chunks 是本地状态, 不需要探依赖 —— 存活探针就该刷新它"""
+    c = _client(rag=StubRag(chunks=42))
+    c.get("/api/v1/health")
+    assert _gauge("kb_chunks") == 42
+
+
+def test_liveness_does_not_touch_ollama_gauge():
+    """ollama_up 只能由就绪探针写 —— 存活探针不探网络, 更不能把它写成 0
+
+    写成 0 会让"只是没人调就绪探针"看起来像"Ollama 挂了"。
+    """
+    from app.core.metrics import OLLAMA_UP
+
+    OLLAMA_UP.set(1)
+    c = _client(rag=StubRag(), probe=DownProbe())
+    c.get("/api/v1/health")          # 存活探针: 即便上游不可达也不该动这个 Gauge
+    assert _gauge("ollama_up") == 1
+
+    c.get("/api/v1/health/ready")    # 就绪探针才会真的去探
+    assert _gauge("ollama_up") == 0

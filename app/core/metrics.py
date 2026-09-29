@@ -7,7 +7,7 @@
   chat_duration_seconds                      问答耗时直方图
   chat_degraded_total                        超时降级计数
   chat_cache_hits_total / chat_cache_misses_total  答案缓存命中/未命中
-  ollama_up                                  上游可达性 (health 探活写入)
+  ollama_up                                  上游可达性 (仅 /health/ready 探活时写入)
   kb_chunks                                  知识库 chunk 数
   session_active                             活跃会话数
   eval_hit_rate / eval_faithfulness_avg / eval_completeness_avg  最近一轮评测
@@ -44,8 +44,8 @@ CACHE_HITS = Counter("chat_cache_hits_total", "答案缓存命中")
 CACHE_MISSES = Counter("chat_cache_misses_total", "答案缓存未命中")
 
 # ── 基础设施/状态 ───────────────────────────────────────
-OLLAMA_UP = Gauge("ollama_up", "Ollama 可达性 (1=up 0=down)")
-KB_CHUNKS = Gauge("kb_chunks", "知识库 chunk 数")
+OLLAMA_UP = Gauge("ollama_up", "Ollama 可达性 (1=up 0=down; 由 /health/ready 写入)")
+KB_CHUNKS = Gauge("kb_chunks", "知识库 chunk 数 (由 /health 与 /health/ready 写入)")
 SESSION_ACTIVE = Gauge("session_active", "活跃会话数")
 
 # ── 评测 ─────────────────────────────────────────────────

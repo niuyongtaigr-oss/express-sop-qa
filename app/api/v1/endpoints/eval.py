@@ -44,14 +44,30 @@ async def _run_eval_task(
     eval_service: EvalService,
     top_k: int,
 ) -> None:
-    """后台执行评测: 检索是同步阻塞调用, 丢线程池"""
+    """后台执行评测: 检索是同步阻塞调用, 丢线程池
+
+    登记表在任务排队期间可能被 `_prune_tasks` 裁掉 (它是有上限的内存结构, 而这
+    个任务还没开始跑)。此时:
+      · 直接退出, **不要把任务复活** —— 复活会让登记表突破上限, 上限定不住。
+      · 更不能对不存在的 key 取下标 (原先第一行就是 `tasks[task_id]["status"]`,
+        被裁掉后这里会抛 KeyError, 而且这个异常没人 await, 变成一条无人认领的报错)。
+    """
+    if task_id not in tasks:
+        logger.info("评测任务已被裁剪, 跳过执行 task_id=%s", task_id)
+        return
     tasks[task_id]["status"] = "running"
     try:
         result = await asyncio.to_thread(eval_service.run, top_k)
-        tasks[task_id] = {"status": "done", **result}
     except Exception as e:
         logger.exception("评测任务失败 task_id=%s", task_id)
-        tasks[task_id] = {"status": "error", "detail": f"{type(e).__name__}: {e}"}
+        if task_id in tasks:
+            tasks[task_id] = {"status": "error", "detail": f"{type(e).__name__}: {e}"}
+        return
+    # 结果写回前再确认一次: 跑到一半被裁掉的任务不该把自己的结果塞回去
+    if task_id in tasks:
+        tasks[task_id] = {"status": "done", **result}
+    else:
+        logger.info("评测任务完成时已被裁剪, 结果丢弃 task_id=%s", task_id)
 
 
 @router.post("/eval/run", response_model=EvalRunResponse)

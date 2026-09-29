@@ -5,7 +5,7 @@
   remove_document — 按 doc_id 删除文档及全部 chunk
   list_documents  — 列出知识库文档清单 (从 chunk 元数据聚合, 无需独立注册表)
   retrieve        — 混合检索: 向量 Top-K + BM25 Top-K → RRF 融合 (可切纯向量)
-  clear_all       — 清空全部文档 (force 重建用)
+  remove_tenant   — 只删某个租户的文档 (重建语料用)
 
 持久化到 data/chroma/, 进程重启索引不丢; 与内存版 Client() 的本质区别。
 P1.5 混合检索: cosine 向量召回擅长语义相关, BM25 擅长精确术语/编号,
@@ -72,8 +72,15 @@ class VectorStore(Protocol):
         """文档清单: [{doc_id, title, chunk_count}]"""
         ...
 
-    def clear_all(self) -> None:
-        """清空全部文档 (重建场景)"""
+    def remove_tenant(self, tenant_id: str) -> int:
+        """删除某个租户的全部 chunk, 返回删除数。
+
+        **刻意不提供"清空全部"**: 集合是多个租户共用的, 任何"重建"都只该动它自己
+        那份数据。原先的 `clear_all()` 在重建语料时把**所有租户**上传的文档一起删
+        了 —— 跨租户的**破坏**比跨租户读取更严重, 而且它是被人无意触发的 (启动时
+        清单缺失 / 改了分块参数就会走到那条路径)。删掉这个方法, 就不会有人再
+        误用它。
+        """
         ...
 
     def retrieve(
@@ -200,16 +207,16 @@ class ChromaVectorStore:
             by_doc[doc_id]["chunk_count"] += 1
         return [by_doc[d] for d in order]
 
-    def clear_all(self) -> None:
-        """清空全部文档 (重建场景)"""
-        total = self._collection.count()
-        if total:
-            data = self._collection.get(include=[])
-            ids = data.get("ids") or []
-            if ids:
-                self._collection.delete(ids=ids)
-        self._bm25 = BM25Index([], [])
-        logger.info("知识库已清空 (removed=%d)", total)
+    def remove_tenant(self, tenant_id: str) -> int:
+        """只删该租户的 chunk; 其他租户与共享库不受影响"""
+        data = self._collection.get(where={"tenant_id": tenant_id}, include=[])
+        ids = data.get("ids") or []
+        if not ids:
+            return 0
+        self._collection.delete(ids=ids)
+        self._rebuild_bm25()   # BM25 索引必须跟着丢, 否则会检索到已删内容
+        logger.info("租户数据已删除 tenant=%s removed=%d", tenant_id, len(ids))
+        return len(ids)
 
     # ── 检索 ─────────────────────────────────────────────
     def retrieve(

@@ -191,3 +191,52 @@ def test_daily_table_full_of_today_rejects_new_keys():
     assert rl.allow("k0")[0] is True
     # 已确认占满后不再每次全表扫
     assert rl.allow("another")[0] is False
+
+
+def test_denied_key_does_not_consume_a_daily_slot():
+    """被令牌表拒绝的新 Key **不占**当日记账位
+
+    写反了顺序的话 —— 先占记账位再查令牌 —— 记账表会被一堆"从没被服务过"的 Key
+    填满; 一旦填满, `_daily_saturated_day` 会在当天一直生效, 于是**所有全新 Key
+    都被封到次日零点**, 哪怕令牌桶早就回满可以淘汰了。令牌表本来"秒级自愈", 这样
+    一写就变成"当天不可用"。
+    """
+    rl = RateLimiter(enabled=True, per_min=6000, burst=2, max_keys=2,
+                     daily_quota=1000)
+    assert rl.allow("a")[0] is True
+    assert rl.allow("b")[0] is True
+    used_before = len(rl._daily)
+
+    for i in range(20):
+        assert rl.allow(f"probe{i}")[0] is False     # 全被令牌表拒绝
+
+    assert len(rl._daily) == used_before, "被拒的 Key 不该占当日记账位"
+    assert rl._daily_saturated_day is None, "不该因为被拒的 Key 把当天记成已满"
+
+    time.sleep(0.05)                                 # burst=2, rate=100/s → 20ms 回满
+    assert rl.allow("probe0")[0] is True, "令牌桶回满后新 Key 必须立刻可用"
+
+
+def test_alert_hint_names_a_real_setting():
+    """告警让运维去调 SOP_QA_RATE_LIMIT_MAX_KEYS —— 这个环境变量必须真的存在
+
+    调不了的告警等于没有告警, 所以这条断言把"告警文本"和"配置项"绑在一起。
+    """
+    from app.config import Settings
+    from app.core.rate_limit import DAILY_MAX_HINT
+
+    assert DAILY_MAX_HINT == "SOP_QA_RATE_LIMIT_MAX_KEYS"
+    field = DAILY_MAX_HINT.removeprefix("SOP_QA_").lower()
+    assert field in Settings.model_fields
+
+
+def test_max_keys_is_configurable():
+    """上界必须可调 —— 否则告警里那句"请调大"是空话"""
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    assert Settings(_env_file=None).rate_limit_max_keys == 10000
+    assert Settings(_env_file=None, rate_limit_max_keys=7).rate_limit_max_keys == 7
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, rate_limit_max_keys=0)

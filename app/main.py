@@ -80,6 +80,7 @@ async def lifespan(app: FastAPI):
         per_min=settings.rate_limit_per_min,
         burst=settings.rate_limit_burst,
         daily_quota=settings.rate_quota_daily,
+        max_keys=settings.rate_limit_max_keys,
     )
     # 后台定期清理过期会话/限流桶 (asyncio 任务, 关闭时取消)
     stop_sweep = asyncio.Event()

@@ -88,13 +88,26 @@ def test_upsert_replaces_document_chunks(tmp_path):
     assert docs[0]["title"] == "v2"
 
 
-def test_clear_all(tmp_path):
+def test_remove_tenant_only_affects_that_tenant(tmp_path):
+    """删某个租户**不能**波及其他租户 —— 集合是共用的"""
+    store = _store(tmp_path)
+    store.add_document("a", "A", "包裹破损处理规范。", tenant_id="alice")
+    store.add_document("b", "B", "包裹遗失处理规范。", tenant_id="bob")
+
+    removed = store.remove_tenant("alice")
+    assert removed > 0
+    assert store.list_documents("alice") == []
+    assert [d["doc_id"] for d in store.list_documents("bob")] == ["b"]
+    # BM25 索引也要跟着丢, 否则会检索到已删内容
+    assert all("alice" not in c.metadata.get("tenant_id", "")
+               for c in store.retrieve("破损", tenant_id="bob"))
+
+
+def test_remove_tenant_is_noop_for_unknown_tenant(tmp_path):
     store = _store(tmp_path)
     store.add_document("a", "A", "包裹破损处理规范。")
-    store.add_document("b", "B", "包裹遗失处理规范。")
-    store.clear_all()
-    assert store.count() == 0
-    assert store.list_documents() == []
+    assert store.remove_tenant("nobody") == 0
+    assert store.count() > 0
 
 
 def test_chunk_metadata_has_doc_fields(tmp_path):

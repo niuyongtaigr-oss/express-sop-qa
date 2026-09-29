@@ -25,6 +25,9 @@ _EVICT_SCAN = 64
 # 当日用量记账表的容量 = max_keys 的倍数 (每条只有 [日期, 次数] 两个字段)
 _DAILY_MULTIPLIER = 4
 
+# 告警里报给运维的配置项名 (对应 Settings.rate_limit_max_keys)
+DAILY_MAX_HINT = "SOP_QA_RATE_LIMIT_MAX_KEYS"
+
 
 @dataclass
 class _Bucket:
@@ -93,21 +96,12 @@ class RateLimiter:
         now = time.monotonic()
         today = date.today()
         with self._lock:
-            # 1) 确保这个 Key 的当日用量记得下。记不下就不能放行 —— 放行等于
-            #    绕过配额。注意这里只确认"有地方记", 不判断"用没用完"。
-            if key not in self._daily:
-                if not self._ensure_daily_room(today):
-                    logger.warning(
-                        "限流: 当日用量表已满 (%d 个 Key 且无跨天记录可清), "
-                        "拒绝新 Key —— 请调大 rate_limit_max_keys", self._daily_max,
-                    )
-                    return False, float(max(self._seconds_until_midnight(), 1)), 0
-                self._daily[key] = [today, 0]
-            rec = self._daily[key]
-            if rec[0] != today:  # 跨天重置
-                rec[0], rec[1] = today, 0
-
-            # 2) 令牌桶
+            # 1) 令牌桶 —— **先查令牌, 再碰当日用量表**。顺序很关键: 被限流拒绝的
+            #    请求不配占一个当日用量名额。反过来写的话, 一个灌满令牌表的新 Key
+            #    会先占掉记账位再被拒, 于是记账表被这些"从没被服务过"的 Key 填满,
+            #    一旦填满 `_daily_saturated_day` 会在当天一直生效 —— 就算令牌桶早
+            #    已回满可淘汰, 所有全新 Key 也会被封到次日零点。那是把令牌表的
+            #    "秒级自愈"放大成"当天不可用"。
             bucket = self._buckets.get(key)
             if bucket is None:
                 if len(self._buckets) >= self._max_keys:
@@ -129,6 +123,20 @@ class RateLimiter:
             if bucket.tokens < 1.0:
                 retry = math.ceil((1.0 - bucket.tokens) / self._rate)
                 return False, max(retry, 1), None
+
+            # 2) 到这里说明这个请求**有令牌可用**, 它才值得占一个当日用量名额。
+            #    记不下就不能放行 —— 放行等于绕过配额。
+            if key not in self._daily:
+                if not self._ensure_daily_room(today):
+                    logger.warning(
+                        "限流: 当日用量表已满 (%d 个被服务过的 Key 且无跨天记录可清), "
+                        "拒绝新 Key —— 请调大 %s", self._daily_max, DAILY_MAX_HINT,
+                    )
+                    return False, float(max(self._seconds_until_midnight(), 1)), 0
+                self._daily[key] = [today, 0]
+            rec = self._daily[key]
+            if rec[0] != today:  # 跨天重置
+                rec[0], rec[1] = today, 0
 
             # 3) 每日配额
             if rec[1] >= self._daily_quota:

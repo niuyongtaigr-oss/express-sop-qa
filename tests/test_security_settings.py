@@ -91,3 +91,37 @@ def test_reasonable_session_id_accepted():
 def test_session_id_max_length_still_enforced():
     with pytest.raises(ValidationError):
         ChatRequest(question="q", session_id="a" * 65)
+
+
+# ── env 取值必须校验 (否则拼错就静默 fail-open) ───────────
+# 启动自检只认精确的 "prod"。若 env 不做取值校验, `Production` / `prd` / 空串都会
+# 落进 dev 分支 —— 一个 fail-closed 的安全闸门被拼写错误变成了 fail-open。
+
+@pytest.mark.parametrize("value,expected", [
+    ("PROD", "prod"), (" prod ", "prod"), ("Prod", "prod"),
+    ("DEV", "dev"), ("dev", "dev"), (" Dev ", "dev"),
+])
+def test_env_is_normalized(value, expected):
+    assert _s(env=value).env == expected
+
+
+@pytest.mark.parametrize("bad", [
+    "Production", "production", "prd", "prod-1", "PRODUCTION", "", "   ", "test",
+])
+def test_env_typo_is_rejected_at_construction(bad):
+    """拼错必须在**构造配置时**就报错, 而不是启动后才让人以为受保护了"""
+    with pytest.raises(ValidationError, match="env 取值非法"):
+        _s(env=bad)
+
+
+def test_env_typo_cannot_silently_disable_the_gate():
+    """反证: 若拼错被放过, 它就会走到 assert_secure_settings 的 dev 分支
+
+    这条锁住的是"拼错 ≠ 放行"这个性质本身。
+    """
+    with pytest.raises(ValidationError):
+        _s(env="Production")          # 构造就失败 → 根本到不了启动自检
+    # 而合法的 prod 归一化后必须被拒绝启动 (没有 key)
+    assert _s(env="PROD").env == "prod"
+    with pytest.raises(RuntimeError, match="拒绝启动"):
+        assert_secure_settings(_s(env="PROD"))

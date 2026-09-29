@@ -44,7 +44,13 @@ async def health(
 
     `indexed_chunks` 是进程内的本地状态 (不产生网络调用), 放在这里只是为了方便
     一眼看到"索引是不是空的"。
+
+    同时刷新 `kb_chunks` 指标 —— 它是本地状态, 不需要探依赖。**`ollama_up` 只能由
+    `/health/ready` 写**: 存活探针刻意不打网络, 拿不到上游状态。所以只挂 liveness
+    探针的部署不会更新 `ollama_up`, 需要该指标就得让就绪探针也被调用 (README 有
+    说明)。
     """
+    KB_CHUNKS.set(rag_service.indexed_chunks)
     return HealthResponse(
         status="ok",
         indexed_chunks=rag_service.indexed_chunks,

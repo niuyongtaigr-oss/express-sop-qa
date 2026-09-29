@@ -48,9 +48,12 @@ class FakeStore:
         del self.docs[doc_id]
         return n
 
-    def clear_all(self):
+    def remove_tenant(self, tenant_id):
+        """只删该租户 —— 与真实实现一致 (清空全部是跨租户破坏)"""
         self.clears += 1
-        self.docs.clear()
+        for doc_id in [d for d, (_t, _x, te) in self.docs.items() if te == tenant_id]:
+            del self.docs[doc_id]
+        return 0
 
 
 # ── 夹具: 临时语料目录 + 临时 Chroma 目录 ────────────────
