@@ -230,3 +230,49 @@ def test_identity_report_shows_normal_identities(monkeypatch):
     monkeypatch.setattr(cp, "commit_identities",
                         lambda: [("someone <someone@example.com>", 2)])
     assert "someone <someone@example.com>" in format_identities()
+
+
+# ── 提交信息检查 (commit-msg 钩子) ───────────────────────
+# 只装 pre-commit (`--staged`) 的话, 它看的是**暂存的文件内容** —— 提交信息不在
+# 暂存区里, 于是"代码没问题但提交信息写了敏感词"完全拦不住。本仓库真的踩过。
+
+def test_commit_message_is_scanned(tmp_path):
+    from scripts.check_privacy import scan_commit_message
+
+    f = tmp_path / "COMMIT_EDITMSG"
+    f.write_text(f"修复: 联系 {_FAKE_EMAIL}\n", encoding="utf-8")
+    hits = scan_commit_message(f)
+    assert [h.rule for h in hits] == ["邮箱"]
+    assert hits[0].line == 1
+
+
+def test_commit_message_ignores_git_template_comments(tmp_path):
+    """`#` 开头的是 git 加的模板/状态行, 提交时会被丢掉, 不该参与判定"""
+    from scripts.check_privacy import scan_commit_message
+
+    f = tmp_path / "COMMIT_EDITMSG"
+    f.write_text(
+        "正常的一句话\n\n"
+        "# 请在下面输入提交说明\n"
+        f"# 联系人: {_FAKE_EMAIL}\n"
+        "# 位于分支 main\n",
+        encoding="utf-8",
+    )
+    assert scan_commit_message(f) == []
+
+
+def test_commit_message_reports_line_numbers(tmp_path):
+    from scripts.check_privacy import scan_commit_message
+
+    f = tmp_path / "COMMIT_EDITMSG"
+    f.write_text(f"第一行\n\n第三行有 {_FAKE_PHONE}\n", encoding="utf-8")
+    hits = scan_commit_message(f)
+    assert [h.rule for h in hits] == ["手机号"]
+    assert hits[0].line == 3
+
+
+def test_commit_message_missing_file_is_not_an_error(tmp_path):
+    """钩子里文件读不到不该把提交搞崩"""
+    from scripts.check_privacy import scan_commit_message
+
+    assert scan_commit_message(tmp_path / "nope") == []

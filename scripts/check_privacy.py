@@ -8,6 +8,7 @@ force push)。所以把「不要带私密信息进去」做成可执行的检查
 用法:
   python3 scripts/check_privacy.py               # 检查全部已跟踪文件
   python3 scripts/check_privacy.py --staged      # 只检查暂存区 (pre-commit 用)
+  python3 scripts/check_privacy.py --commit-msg F # 检查一条提交信息 (commit-msg 钩子用)
   python3 scripts/check_privacy.py --history     # 检查**全部提交历史** (message + diff + 作者身份)
   python3 scripts/check_privacy.py --identities  # 只看提交作者身份 (会公开显示的那个字段)
   python3 scripts/check_privacy.py --list-rules  # 打印当前生效的规则
@@ -22,8 +23,14 @@ force push)。所以把「不要带私密信息进去」做成可执行的检查
 用工作邮箱提交作品集仓库, 就是把任职单位域名挂在了公开页面上。本脚本原先只扫
 message/diff/路径, 完全没看这个字段。
 
-装成 pre-commit 钩子 (推荐):
+装成钩子 (推荐**两个都装**):
   ln -sf ../../scripts/check_privacy.py .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+  ln -sf ../../scripts/check_privacy.py .git/hooks/commit-msg && chmod +x .git/hooks/commit-msg
+
+为什么 commit-msg 也要装: `--staged` 看的是**暂存的文件内容**, 而提交信息不在暂存
+区里 —— 只看暂存区就完全拦不住"代码没问题、但提交信息里写了敏感词"。本仓库真的
+踩过这个坑 (写提交信息时复述了一个敏感词), 事后才发现, 而提交信息同样会永久留在
+公开仓库的变更记录里。
 
 CI / pytest:
   tests/test_repo_hygiene.py 会在每次跑测试时执行同一套检查。
@@ -300,6 +307,28 @@ def _match_line(line: str, rules: list[tuple[str, re.Pattern[str]]]) -> list[Hit
 _DIFF_FILE = re.compile(r"^\+\+\+ b/(.+)$")
 
 
+def scan_commit_message(path: Path) -> list[Hit]:
+    """检查一条提交信息文本 (commit-msg 钩子入口)。
+
+    git 传进来的是 COMMIT_EDITMSG, 里面除了用户写的内容, 还有一大段以 `#` 开头的
+    模板与状态行 —— 那些在提交时会被丢掉, 不参与判定 (否则模板里随便出现一个
+    邮箱域名就会误报)。
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    rules = active_rules()
+    hits: list[Hit] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        for hit in _match_line(line, rules):
+            hits.append(Hit(path="(commit message)", line=lineno,
+                            rule=hit.rule, length=hit.length))
+    return hits
+
+
 def scan_history(rules: list[tuple[str, re.Pattern[str]]] | None = None) -> list[Hit]:
     """扫描全部提交历史: 每个提交的 message + diff, 以及历史路径名。
 
@@ -363,6 +392,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="检查全部提交历史 (message + diff + 历史路径名 + 作者身份)")
     parser.add_argument("--identities", action="store_true",
                         help="只打印提交的作者身份 (这个字段同样会公开显示)")
+    parser.add_argument("--commit-msg", metavar="FILE",
+                        help="检查一个提交信息文件 (commit-msg 钩子用)")
     parser.add_argument("--list-rules", action="store_true", help="打印当前生效的规则")
     parser.add_argument("--quiet", action="store_true", help="仅在发现问题时输出")
     args = parser.parse_args(argv)
@@ -375,6 +406,12 @@ def main(argv: list[str] | None = None) -> int:
         terms = _custom_terms()
         print(f"本地自定义词: {len(terms)} 个" if terms else "本地自定义词: 无")
         return 0
+
+    if args.commit_msg:
+        hits = scan_commit_message(Path(args.commit_msg))
+        if hits or not args.quiet:
+            print(format_report(hits))
+        return 1 if hits else 0
 
     if args.identities:
         print(format_identities())
