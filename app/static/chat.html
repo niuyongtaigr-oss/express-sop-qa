@@ -51,6 +51,12 @@
   .src { border-left:2px solid var(--line); padding:4px 0 4px 10px; margin:8px 0; }
   .src .head { font-size:12px; color:var(--muted); }
   .src .txt { white-space:pre-wrap; word-break:break-word; margin-top:4px; }
+  details.mem { margin-top:8px; font-size:12px; }
+  details.mem summary { color:#7c3aed; }
+  .mem-item { border-left:2px solid #ddd6fe; background:#faf5ff; border-radius:4px;
+              padding:6px 8px; margin:6px 0 0; }
+  .mem-item .head { font-size:12px; color:#6d28d9; }
+  .mem-item .txt { white-space:pre-wrap; word-break:break-word; margin-top:2px; }
   footer { background:#fff; border-top:1px solid var(--line); padding:12px 16px; }
   .composer { max-width:820px; margin:0 auto; display:flex; gap:8px; align-items:flex-end; }
   textarea { flex:1; resize:none; min-height:46px; max-height:160px; padding:10px 12px;
@@ -75,8 +81,11 @@
   <span class="spacer"></span>
   <label class="meta" for="key">访问密钥</label>
   <input id="key" type="password" placeholder="服务端配了访问控制时必填" autocomplete="off">
+  <label class="meta" for="uid" title="仅本地开发生效；服务端启用访问控制后此请求头会被忽略">用户</label>
+  <input id="uid" class="uid" placeholder="仅本地开发" autocomplete="off">
   <button id="save-key">保存</button>
   <button id="new-session">新会话</button>
+  <a class="meta" href="/memory">我的记忆</a>
   <a class="meta" href="/admin">管理台</a>
   <a class="meta" href="/docs">接口文档</a>
 </header>
@@ -106,6 +115,7 @@ const EXAMPLES = [
 ];
 
 // ── 会话与密钥 ───────────────────────────────────────────
+function userId() { return sessionStorage.getItem("sop_qa_user_id") || ""; }
 function apiKey() { return sessionStorage.getItem(KEY_STORE) || ""; }
 function sessionId() {
   let sid = sessionStorage.getItem(SID_STORE);
@@ -149,6 +159,20 @@ function addTurn(who) {
   scroll();
   return { bubble, row, body };
 }
+function renderMemories(bubble, memories) {
+  if (!memories || !memories.length) return;
+  const box = el("details", "mem");
+  box.append(el("summary", null, "系统记得你 " + memories.length + " 条"));
+  for (const m of memories) {
+    const item = el("div", "mem-item");
+    const kind = { fact: "事实", preference: "偏好", episode: "经历" }[m.kind] || m.kind;
+    item.append(el("div", "head",
+      kind + (m.key ? " · " + m.key : "") + "　重要度 " + (m.importance ?? "-")));
+    item.append(el("div", "txt", m.text || ""));
+    box.append(item);
+  }
+  bubble.append(box);
+}
 function renderSources(bubble, sources, rounds) {
   if (!sources || !sources.length) return;
   const box = el("details");
@@ -172,6 +196,8 @@ function renderSources(bubble, sources, rounds) {
 async function ask(question, ui, signal) {
   const headers = { "Content-Type": "application/json" };
   if (apiKey()) headers["X-API-Key"] = apiKey();
+  // 断言式身份: 只在服务端未启用访问控制时被采纳 (启用后由认证决定, 会被忽略)
+  if (userId()) headers["X-User-Id"] = userId();
 
   const res = await fetch("/api/v1/chat/stream", {
     method: "POST",
@@ -225,6 +251,9 @@ async function ask(question, ui, signal) {
         ui.body.textContent = answer;     // 只改正文节点, 徽标/引用不受影响
         ui.bubble.classList.add("cursor");
         scroll();
+      } else if (ev.type === "memory") {
+        // 记忆事件在生成之前就到, 直接挂在气泡上, 不依赖后面的答案
+        renderMemories(ui.bubble, ev.memories);
       } else if (ev.type === "sources") {
         renderSources(ui.bubble, ev.sources, ev.rounds);
       } else if (ev.type === "error") {
@@ -293,6 +322,9 @@ $("new-session").onclick = newSession;
 $("save-key").onclick = () => {
   const v = $("key").value.trim();
   if (v) sessionStorage.setItem(KEY_STORE, v); else sessionStorage.removeItem(KEY_STORE);
+  const u = $("uid").value.trim();
+  if (u) sessionStorage.setItem("sop_qa_user_id", u);
+  else sessionStorage.removeItem("sop_qa_user_id");
   $("save-key").textContent = "已保存";
   setTimeout(() => { $("save-key").textContent = "保存"; }, 1500);
 };
@@ -310,6 +342,7 @@ for (const q of EXAMPLES) {
   $("chips").append(c);
 }
 $("key").value = apiKey();
+$("uid").value = userId();
 label();
 
 // ?q=问题 —— 深链: 问题可以直接分享, README 里也能链过来 (顺带让截图能跑真实问答)

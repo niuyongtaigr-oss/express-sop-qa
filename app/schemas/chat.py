@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel, Field
 
+from app.schemas.memory import MemoryItemDTO
+
 
 class ChatRequest(BaseModel):
     """智能问答请求"""
@@ -62,6 +64,9 @@ class ChatResponse(BaseModel):
     answer: str
     intent: str  # rag_qa / direct / multi_hop / degraded
     sources: list[SourceItem] = []
+    # 本轮召回并喂给模型的长期记忆 —— 暴露出来是为了让"系统记住了什么"可见:
+    # 记忆错了却看不见, 就没法排查(它不像引用那样有原文可核对)
+    memories: list[MemoryItemDTO] = []
     trace_id: str
     elapsed_ms: float
     session_id: str | None = None

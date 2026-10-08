@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>快递 SOP · 我的长期记忆</title>
+<!--
+  单文件、零依赖、无 CDN —— 受限网络里也能打开。
+  本页自身不持有任何数据: 内容全部由 /api/v1/memory 实时拉取。密钥只存在**本标签页**
+  的 sessionStorage 里 (关掉即消失), 且只作为 X-API-Key 发给同源 API。
+
+  为什么需要这个页面: 记忆里装的是**个人信息**, 只有 API 的话, "系统记住了我什么"
+  就只能靠 curl 看 —— 看不到就等于没有。而且合规上要求"能写就必须能删",
+  删除入口必须是人能点到的东西, 不是文档里的一行 curl。
+
+  安全注意: 记忆正文来自服务端(可能是用户自己说过的话), 渲染一律用 textContent 或
+  createElement, **绝不拼 innerHTML**。用户完全可以在对话里说一句带 <script> 的话,
+  如果这里拼 HTML, 下次打开这个页面就会执行它。
+-->
+<style>
+  :root { --fg:#1f2328; --muted:#656d76; --line:#d0d7de; --bg:#f6f8fa;
+          --accent:#0969da; --danger:#cf222e; --ok:#1a7f37; --mem:#7c3aed; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px; font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+         color:var(--fg); background:#fff; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:0 0 10px; }
+  .muted { color:var(--muted); font-size:13px; }
+  .card { border:1px solid var(--line); border-radius:8px; padding:16px; margin:16px 0; }
+  .row { display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; }
+  .field { display:flex; flex-direction:column; gap:4px; }
+  label { font-size:12px; color:var(--muted); }
+  input { padding:6px 8px; border:1px solid var(--line); border-radius:6px; font-size:13px; }
+  input#key { width:340px; }
+  button { padding:6px 12px; border:1px solid var(--line); border-radius:6px;
+           background:#fff; cursor:pointer; font-size:13px; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { color:var(--danger); border-color:#ffcecb; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  #msg { margin-top:10px; font-size:13px; min-height:20px; }
+  #msg.err { color:var(--danger); }
+  #msg.ok { color:var(--ok); }
+  #msg.info { color:var(--muted); }
+  .item { border:1px solid var(--line); border-left:3px solid var(--mem); border-radius:6px;
+          padding:10px 12px; margin:10px 0; }
+  .item .head { display:flex; justify-content:space-between; gap:12px; align-items:baseline; }
+  .item .meta { font-size:12px; color:var(--muted); }
+  .item .txt { margin-top:6px; white-space:pre-wrap; word-break:break-word; }
+  .tag { display:inline-block; font-size:12px; padding:0 6px; border-radius:10px;
+         background:#f3e8ff; color:var(--mem); margin-right:6px; }
+  nav { font-size:13px; margin-bottom:12px; }
+  nav a { color:var(--accent); text-decoration:none; margin-right:12px; }
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="/">← 对话页</a>
+  <a href="/admin">知识库管理台</a>
+  <a href="/docs">接口文档</a>
+</nav>
+
+<h1>我的长期记忆</h1>
+<p class="muted">
+  这里只显示<strong>当前身份</strong>的记忆 —— 隔离维度是（租户, 用户），都来自认证，
+  不是页面传的。记忆是"关于你的事实与偏好"，由对话自动沉淀；你可以逐条删除或全部清空。
+</p>
+
+<section class="card">
+  <h2>身份</h2>
+  <div class="row">
+    <div class="field">
+      <label for="key">X-API-Key（服务端配置了访问控制时必填）</label>
+      <input id="key" type="password" placeholder="留空则不带密钥请求" autocomplete="off">
+    </div>
+    <div class="field">
+      <label for="uid">用户标识（仅本地开发）</label>
+      <input id="uid" placeholder="未启用访问控制时才生效" autocomplete="off">
+    </div>
+    <button class="primary" id="save">保存并加载</button>
+    <button id="clear-key">清除密钥</button>
+  </div>
+  <p class="hint muted">
+    密钥只保存在本标签页的 sessionStorage，关闭标签页即消失，不会写入服务端。<br>
+    「用户标识」是<strong>本地开发</strong>用的断言通道：服务端一旦启用访问控制（配了 API Key 或
+    开了多租户模式），这个请求头会被<strong>直接忽略</strong>，身份只认认证结果 —— 见 README
+    「身份与隔离」。生产环境请用绑定了 user_id 的 API Key。
+  </p>
+  <div id="msg" class="info"></div>
+</section>
+
+<section class="card">
+  <div class="head" style="display:flex;justify-content:space-between;align-items:baseline">
+    <h2 style="margin:0">记忆清单 <span class="muted" id="count"></span></h2>
+    <div>
+      <button id="reload">刷新</button>
+      <button class="danger" id="wipe">清空我的全部记忆</button>
+    </div>
+  </div>
+  <div id="list"></div>
+</section>
+
+<script>
+"use strict";
+
+function $(id) { return document.getElementById(id); }
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined && text !== null) n.textContent = String(text);
+  return n;
+}
+function msg(kind, text) {
+  const m = $("msg");
+  m.className = kind || "info";
+  m.textContent = text || "";
+}
+function apiKey() { return sessionStorage.getItem("sop_qa_api_key") || ""; }
+function userId() { return sessionStorage.getItem("sop_qa_user_id") || ""; }
+
+async function call(path, options) {
+  const opts = Object.assign({ headers: {} }, options || {});
+  const k = apiKey();
+  if (k) opts.headers["X-API-Key"] = k;
+  // 断言式身份: 只在服务端未启用访问控制时才会被采纳, 启用后被忽略(服务端有测试守着)
+  const u = userId();
+  if (u) opts.headers["X-User-Id"] = u;
+  const r = await fetch(path, opts);
+  let body = null;
+  try { body = await r.json(); } catch (e) { body = null; }
+  if (!r.ok) {
+    const detail = body && body.detail ? body.detail : ("HTTP " + r.status);
+    throw new Error(detail);
+  }
+  return body;
+}
+
+function kindLabel(kind) {
+  return { fact: "事实", preference: "偏好", episode: "经历" }[kind] || kind || "?";
+}
+
+function render(data) {
+  const list = $("list");
+  list.textContent = "";
+  $("count").textContent = data.enabled
+    ? ("共 " + data.total + " 条 · 用户 " + (data.user_id || "?"))
+    : "长期记忆未启用（SOP_QA_MEMORY_ENABLED=false）";
+
+  if (!data.items || !data.items.length) {
+    list.append(el("p", "muted",
+      data.enabled ? "还没有任何记忆。去对话页说点关于你自己的事，系统会自己沉淀。"
+                   : "开启 SOP_QA_MEMORY_ENABLED 后才会记录。"));
+    return;
+  }
+  for (const m of data.items) {
+    const box = el("div", "item");
+    const head = el("div", "head");
+    const left = el("div");
+    left.append(el("span", "tag", kindLabel(m.kind)));
+    if (m.key) left.append(el("span", "muted", m.key + "　"));
+    left.append(el("span", "muted", "重要度 " + (m.importance ?? "-")));
+    head.append(left);
+    const btn = el("button", "danger", "删除");
+    btn.addEventListener("click", () => removeOne(m.memory_id, btn));
+    head.append(btn);
+    box.append(head);
+    box.append(el("div", "txt", m.text || ""));
+    list.append(box);
+  }
+}
+
+async function load() {
+  msg("info", "加载中…");
+  try {
+    const data = await call("/api/v1/memory");
+    render(data);
+    msg("ok", "已加载 " + data.total + " 条");
+  } catch (e) {
+    $("list").textContent = "";
+    $("count").textContent = "";
+    msg("err", e.message);
+  }
+}
+
+async function removeOne(memoryId, btn) {
+  btn.disabled = true;
+  try {
+    await call("/api/v1/memory/" + encodeURIComponent(memoryId), { method: "DELETE" });
+    msg("ok", "已删除 1 条");
+    await load();
+  } catch (e) {
+    btn.disabled = false;
+    msg("err", "删除失败: " + e.message);
+  }
+}
+
+async function wipe() {
+  if (!confirm("确定清空你的全部长期记忆？此操作不可撤销。")) return;
+  $("wipe").disabled = true;
+  try {
+    const r = await call("/api/v1/memory", { method: "DELETE" });
+    msg("ok", "已清空 " + r.removed + " 条");
+    await load();
+  } catch (e) {
+    msg("err", "清空失败: " + e.message);
+  } finally {
+    $("wipe").disabled = false;
+  }
+}
+
+$("save").addEventListener("click", () => {
+  const v = $("key").value.trim();
+  if (v) sessionStorage.setItem("sop_qa_api_key", v);
+  else sessionStorage.removeItem("sop_qa_api_key");
+  const u = $("uid").value.trim();
+  if (u) sessionStorage.setItem("sop_qa_user_id", u);
+  else sessionStorage.removeItem("sop_qa_user_id");
+  load();
+});
+$("clear-key").addEventListener("click", () => {
+  sessionStorage.removeItem("sop_qa_api_key");
+  sessionStorage.removeItem("sop_qa_user_id");
+  $("key").value = "";
+  $("uid").value = "";
+  msg("info", "已清除本页保存的密钥与用户标识");
+});
+$("reload").addEventListener("click", load);
+$("wipe").addEventListener("click", wipe);
+
+$("key").value = apiKey();
+$("uid").value = userId();
+load();
+</script>
+</body>
+</html>

@@ -180,10 +180,11 @@ def _setup_cors(app: FastAPI, settings: Settings) -> None:
 
 
 def _mount_pages(app: FastAPI) -> None:
-    """挂载两个页面 —— 都是单文件 HTML, 无外部依赖。
+    """挂载三个页面 —— 都是单文件 HTML, 无外部依赖。
 
       GET /        对话页 (产品本体): 接 /chat/stream, SSE 真流式 + 可定位引用
       GET /admin   管理台: 文档清单 / 上传 / 删除 / 重建索引 / 反馈统计
+      GET /memory  我的长期记忆: 查看/删除自己的记忆 (P5)
 
     为什么必须有对话页: 这个项目的产品形态就是问答, 但接口只能靠 curl 或 Swagger
     试。没有页面, 别人(面试官/客户)无法在两分钟内看到它 —— 而"要配 Ollama 拉 6GB
@@ -210,6 +211,16 @@ def _mount_pages(app: FastAPI) -> None:
     @app.get("/admin", include_in_schema=False)
     async def admin_console() -> FileResponse:
         return FileResponse(static / "admin.html", media_type="text/html")
+
+    @app.get("/memory", include_in_schema=False)
+    async def memory_page() -> FileResponse:
+        """长期记忆管理页。
+
+        为什么值得单独开一个页面: 记忆里装的是**个人信息**, 如果只有 API,
+        "系统记住了我什么"就只能靠 curl 看 —— 看不到就等于没有; 而且合规上要求
+        "能写就必须能删", 删除入口得是人能点到的东西, 不是文档里一行 curl。
+        """
+        return FileResponse(static / "memory.html", media_type="text/html")
 
 
 def create_app() -> FastAPI:

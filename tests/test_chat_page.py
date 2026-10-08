@@ -113,6 +113,44 @@ def _page_handled_types() -> set[str]:
     return set(re.findall(r'ev\.type === "(\w+)"', _body()))
 
 
+def _contract_settings():
+    from test_graph_nodes import make_settings
+
+    return make_settings()
+
+
+def _memory_service_with_one_item():
+    """一个装着一条记忆的记忆服务 (临时 chroma, 不碰真实数据)
+
+    为了让 `memory` 事件真的被触发 —— 契约测试必须构造出触发条件, 否则它只是
+    "恰好没漏", 而不是"证明了没漏"。
+    """
+    import tempfile
+
+    from app.infrastructure.memory_store import ChromaMemoryStore, MemoryItem
+    from app.services.memory_service import MemoryService
+
+    class _NoopEmbed:
+        def embed(self, texts):
+            return [[1.0, 0.0] for _ in texts]
+
+    class _NoopLLM:
+        def structured_invoke(self, schema, messages):
+            raise RuntimeError("契约测试不该走到抽取")
+
+    tmp = tempfile.mkdtemp(prefix="contract-memory-")
+    store = ChromaMemoryStore(tmp, "contract_mem", _NoopEmbed())
+    store.add(MemoryItem(text="用户常驻上海", tenant_id="t", user_id="u-1",
+                         key="居住地", importance=0.9))
+    settings = _contract_settings()
+    svc = MemoryService(store, _NoopLLM(),
+                        settings.model_copy(update={
+                            "memory_enabled": True,
+                            "memory_recall_min_similarity": 0.0,
+                        }))
+    return svc
+
+
 def test_page_handles_every_event_type_the_server_emits():
     """用**真实图**跑一遍 stream(), 把实际事件类型与页面分支对齐
 
@@ -128,16 +166,25 @@ def test_page_handles_every_event_type_the_server_emits():
 
     settings = make_settings()
     graph = build_chat_graph(StubRag(), StubLLM(intent="rag_qa"), settings)
-    svc = ChatService(graph, SessionStore(), settings)
+
+    # 记忆服务必须接上: `memory` 事件只在**召回到记忆**时才发, 不接的话这条用例
+    # 就漏掉了它 —— 契约测试的盲区恰好是"条件性发出"的事件, 所以这里要主动
+    # 造出触发条件 (给该用户预置一条记忆)。
+    memory = _memory_service_with_one_item()
+    svc = ChatService(graph, SessionStore(), settings, memory=memory)
 
     async def collect() -> set[str]:
         seen: set[str] = set()
-        async for ev in svc.stream("包裹破损怎么办"):
+        async for ev in svc.stream("包裹破损怎么办", tenant_id="t", user_id="u-1"):
             seen.add(ev["type"])
         return seen
 
     emitted = asyncio.run(collect())
     assert emitted, "这条用例没收到任何事件, 契约就白测了"
+    assert "memory" in emitted, (
+        "没收到 memory 事件 → 契约测试没覆盖到它。检查 StubRag/记忆桩是否还能"
+        "触发召回, 否则这条用例会假装覆盖了实际没覆盖的东西。"
+    )
 
     handled = _page_handled_types()
     missing = emitted - handled
@@ -159,3 +206,13 @@ def test_page_parses_sse_frames_conservatively():
     text = _body()
     assert r'"\n\n"' in text or "'\\n\\n'" in text
     assert "[DONE]" in text
+
+
+def test_chat_page_can_assert_a_dev_user_id():
+    """本地开发时对话页也要能带 X-User-Id —— 否则本地看不到长期记忆
+
+    服务端只在未启用访问控制时采纳这个请求头(有测试守着), 启用后由认证决定。
+    """
+    text = _body()
+    assert "X-User-Id" in text
+    assert 'sessionStorage.getItem("sop_qa_user_id")' in text

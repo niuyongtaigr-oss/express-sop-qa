@@ -18,6 +18,19 @@ class MemoryItemDTO(BaseModel):
     created_at: float = 0.0
     updated_at: float = 0.0
 
+    @classmethod
+    def from_item(cls, item) -> "MemoryItemDTO":
+        """从 MemoryItem 映射 —— 只此一处, 别在端点里各写一份
+
+        (与 `SourceItem.from_chunk` 同一个理由: 两处映射就会有两处漂移,
+        加字段时漏掉一处不会报错, 只会让某个接口悄悄少返回一个字段。)
+        """
+        return cls(
+            memory_id=item.memory_id, text=item.text, kind=item.kind, key=item.key,
+            importance=item.importance, created_at=item.created_at,
+            updated_at=item.updated_at,
+        )
+
 
 class MemoryListResponse(BaseModel):
     """列出当前用户的记忆"""

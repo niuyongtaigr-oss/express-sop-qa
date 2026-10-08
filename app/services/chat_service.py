@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from app.config import Settings
+from app.schemas.memory import MemoryItemDTO
 from app.core.logging import get_trace_id
 from app.core.metrics import (
     CACHE_HITS,
@@ -129,7 +130,7 @@ class ChatService:
                 self._cache_stats.miss()
                 CACHE_MISSES.inc()
 
-        memory_text = self._recall_memory(question, tenant_id, user_id)
+        memories, memory_text = self._recall_memory(question, tenant_id, user_id)
 
         if not cached:
             result = await self._invoke_with_guard(
@@ -162,6 +163,9 @@ class ChatService:
             "answer": answer,
             "intent": intent,
             "sources": result.get("sources", []),
+            # 本轮召回并喂给模型的长期记忆 —— 暴露出来是为了让"系统记住了什么"
+            # 可见: 记忆错了却看不见, 就没法排查(它不像引用那样有原文可核对)
+            "memories": [MemoryItemDTO.from_item(m) for m in memories],
             "trace_id": get_trace_id(),
             "elapsed_ms": elapsed_ms,
             "session_id": session_id,
@@ -187,7 +191,13 @@ class ChatService:
         此时 answer_parts 是半截的, 写进历史只会污染下一轮上下文。
         """
         history = self._sessions.get_history(tenant_id, user_id, session_id)
-        memory_text = self._recall_memory(question, tenant_id, user_id)
+        memories, memory_text = self._recall_memory(question, tenant_id, user_id)
+        # 有记忆才发这个事件: 多数轮次是空的, 每次都发只会让帧流变吵
+        if memories:
+            yield {
+                "type": "memory",
+                "memories": [MemoryItemDTO.from_item(m).model_dump() for m in memories],
+            }
         answer_parts: list[str] = []
         intent = "unknown"
         degraded = False
@@ -269,17 +279,22 @@ class ChatService:
 
     # ── 内部: 限流 + 超时降级 ─────────────────────────────
     # ── 长期记忆 (P5) ────────────────────────────────────
-    def _recall_memory(self, question: str, tenant_id: str, user_id: str) -> str:
-        """召回该用户的长期记忆并格式化成提示词段落 (未启用/无用户 → 空串)"""
+    def _recall_memory(
+        self, question: str, tenant_id: str, user_id: str
+    ) -> tuple[list, str]:
+        """召回该用户的长期记忆, 返回 (条目, 提示词段落)
+
+        条目要一起返回, 因为"这轮到底喂了模型哪些记忆"必须**可见**: 记忆不像引用
+        那样有原文可核对, 错了却看不见就没法排查。
+        """
         if self._memory is None or not user_id:
-            return ""
+            return [], ""
         try:
-            return self._memory.format_memories(
-                self._memory.recall(question, tenant_id, user_id)
-            )
+            items = self._memory.recall(question, tenant_id, user_id)
+            return items, self._memory.format_memories(items)
         except Exception:
             logger.exception("记忆召回失败, 按无记忆继续")
-            return ""
+            return [], ""
 
     def _schedule_memory(
         self, question: str, answer: str, tenant_id: str,
