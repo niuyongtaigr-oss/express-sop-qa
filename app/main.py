@@ -49,10 +49,12 @@ async def lifespan(app: FastAPI):
     from app.core.rate_limit import RateLimiter
     from app.infrastructure.embeddings import create_embedding_client
     from app.infrastructure.llm import create_intent_llm, create_llm_client
+    from app.infrastructure.memory_store import create_memory_store
     from app.infrastructure.vector_store import create_vector_store
     from app.services.chat_service import ChatService
     from app.services.eval_service import EvalService
     from app.services.feedback_service import FeedbackStore
+    from app.services.memory_service import MemoryService
     from app.services.rag_service import RagService
     from app.services.session_service import SessionStore
     from app.services.tenant_service import TenantRegistry
@@ -69,6 +71,15 @@ async def lifespan(app: FastAPI):
     logger.info("知识库就绪: %d chunks (rebuilt=%s)", n, rebuilt)
 
     graph = build_chat_graph(rag_service, llm, settings, intent_llm=intent_llm)
+
+    # 长期记忆 (P5): 独立 collection, 按 (租户, 用户) 隔离。
+    # 默认关闭 —— 开启后每次成功回答会多一次 LLM 抽取调用(后台执行, 不挡响应)。
+    memory_service = MemoryService(
+        create_memory_store(settings, embeddings), llm, settings
+    )
+    if memory_service.enabled:
+        logger.info("长期记忆已启用 (collection=%s, top_k=%d)",
+                    settings.memory_collection_name, settings.memory_top_k)
 
     sessions = SessionStore(
         ttl_s=settings.session_ttl_s,
@@ -97,6 +108,7 @@ async def lifespan(app: FastAPI):
                 try:
                     await asyncio.to_thread(sessions.sweep)
                     await asyncio.to_thread(rate_limiter.sweep)
+                    await asyncio.to_thread(memory_service.sweep)
                     SESSION_ACTIVE.set(sessions.count())
                 except Exception:
                     logger.exception("后台清理失败, 本轮跳过")
@@ -107,7 +119,9 @@ async def lifespan(app: FastAPI):
     app.state.chat_service = ChatService(
         graph, sessions, settings,
         get_kb_version=lambda: rag_service.kb_version,
+        memory=memory_service,
     )
+    app.state.memory_service = memory_service
     app.state.eval_service = EvalService(rag_service, llm, settings)
     app.state.eval_tasks = {}
     app.state.sessions = sessions

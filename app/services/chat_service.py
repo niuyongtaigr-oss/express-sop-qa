@@ -55,10 +55,15 @@ class ChatService:
         sessions: SessionStore,
         settings: Settings,
         get_kb_version: Callable[[], int] | None = None,
+        memory: Any = None,
     ):
         self._graph = graph
         self._sessions = sessions
         self._settings = settings
+        # 长期记忆 (P5)。为 None 或未启用时, 召回返回空、写入直接跳过。
+        self._memory = memory
+        # 后台记忆任务的强引用 —— asyncio 只持弱引用, 不留着会被 GC 掉
+        self._memory_tasks: set[asyncio.Task] = set()
         self._get_kb_version = get_kb_version or (lambda: 0)
         # 进程级信号量: 超过 max_concurrency 的请求排队,
         # 防止突发流量把 Ollama (本地单点) 打挂
@@ -124,9 +129,11 @@ class ChatService:
                 self._cache_stats.miss()
                 CACHE_MISSES.inc()
 
+        memory_text = self._recall_memory(question, tenant_id, user_id)
+
         if not cached:
             result = await self._invoke_with_guard(
-                question, session_id, tenant_id, user_id
+                question, session_id, tenant_id, user_id, memory_text
             )
             # 真实回答且无会话才写缓存; 降级/异常不入缓存
             if (
@@ -142,6 +149,7 @@ class ChatService:
         # 记忆回写: 只有真实回答才入库, 降级提示不污染历史
         if not cached and intent != "degraded":
             self._sessions.add_turn(tenant_id, user_id, session_id, question, answer)
+            self._schedule_memory(question, answer, tenant_id, user_id, session_id)
         # Prometheus 指标
         CHAT_REQUESTS.labels(intent).inc()
         if not cached:
@@ -179,6 +187,7 @@ class ChatService:
         此时 answer_parts 是半截的, 写进历史只会污染下一轮上下文。
         """
         history = self._sessions.get_history(tenant_id, user_id, session_id)
+        memory_text = self._recall_memory(question, tenant_id, user_id)
         answer_parts: list[str] = []
         intent = "unknown"
         degraded = False
@@ -192,6 +201,8 @@ class ChatService:
                                 "question": question,
                                 "history": history,
                                 "tenant_id": tenant_id,
+                                "user_id": user_id,
+                                "memory_text": memory_text,
                             },
                             version="v2",
                         ):
@@ -211,9 +222,12 @@ class ChatService:
 
         # 只有走完正常路径 (非降级、非异常、且客户端没断连) 才回写记忆
         if not degraded and not failed:
+            answer_text = "".join(answer_parts)
             self._sessions.add_turn(
-                tenant_id, user_id, session_id, question, "".join(answer_parts)
+                tenant_id, user_id, session_id, question, answer_text
             )
+            # 记忆写入放后台: 它会多调一次 LLM(CPU 上十几秒), 绝不能挡在 done 之前
+            self._schedule_memory(question, answer_text, tenant_id, user_id, session_id)
         yield {
             "type": "done",
             "trace_id": get_trace_id(),
@@ -254,12 +268,48 @@ class ChatService:
                     yield event
 
     # ── 内部: 限流 + 超时降级 ─────────────────────────────
+    # ── 长期记忆 (P5) ────────────────────────────────────
+    def _recall_memory(self, question: str, tenant_id: str, user_id: str) -> str:
+        """召回该用户的长期记忆并格式化成提示词段落 (未启用/无用户 → 空串)"""
+        if self._memory is None or not user_id:
+            return ""
+        try:
+            return self._memory.format_memories(
+                self._memory.recall(question, tenant_id, user_id)
+            )
+        except Exception:
+            logger.exception("记忆召回失败, 按无记忆继续")
+            return ""
+
+    def _schedule_memory(
+        self, question: str, answer: str, tenant_id: str,
+        user_id: str, session_id: str | None,
+    ) -> None:
+        """把"抽取 + 冲突消解 + 落库"丢到后台执行。
+
+        两个刻意的选择:
+          · **不 await**: 记忆写入要多调一次 LLM, 挡在响应里会让每次回答都变慢;
+            记忆是尽力而为, 晚一点到没关系。
+          · 失败一律吞掉 (remember 内部已处理): 记不住不该影响用户拿到回答。
+        """
+        if self._memory is None or not user_id or not answer:
+            return
+        if not getattr(self._memory, "enabled", False):
+            return
+        task = asyncio.create_task(asyncio.to_thread(
+            self._memory.remember, question, answer,
+            tenant_id, user_id, session_id or "",
+        ))
+        self._memory_tasks.add(task)
+        task.add_done_callback(self._memory_tasks.discard)
+
     async def _invoke_with_guard(
         self,
         question: str,
         session_id: str | None,
         tenant_id: str = "default",
         user_id: str = "",
+        memory_text: str = "",
     ) -> dict:
         async def _run() -> dict:
             async with self._semaphore:
@@ -274,6 +324,7 @@ class ChatService:
                         "tenant_id": tenant_id,
                         # 记忆链路要用: 检索/写入都按 (租户, 用户) 隔离
                         "user_id": user_id,
+                        "memory_text": memory_text,
                     },
                 )
 

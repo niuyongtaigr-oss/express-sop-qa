@@ -95,6 +95,7 @@ def make_rag_qa_node(rag_service: RagService):
             state["question"],
             history=state.get("history"),
             tenant_id=state.get("tenant_id", "default"),
+            memory=state.get("memory_text", ""),
         )
         return {"answer": result["answer"], "sources": result["sources"]}
 
@@ -105,8 +106,13 @@ def make_direct_node(llm: LLMClient):
     """直接回答节点: 闲聊/通用问题, 不走知识库 (带对话历史)"""
 
     def direct_node(state: ChatState) -> dict:
+        # 记忆段落放在 system 之后、历史之前: 它是"关于这个用户的背景",
+        # 不是这轮对话的内容, 放错位置模型会把它当成用户刚说的话
+        memory = state.get("memory_text", "")
+        memory_msg = [SystemMessage(content=memory)] if memory else []
         answer = llm.invoke(
             [SystemMessage(content=_DIRECT_SYSTEM)]
+            + memory_msg
             + _history_messages(state.get("history"))
             + [HumanMessage(content=state["question"])],
         )
@@ -238,7 +244,8 @@ def make_multi_hop_node(rag_service: RagService, llm: LLMClient, settings: Setti
         # 去重 + 按相关度重排后再截断 (不能用拼接序, 见 _dedupe_and_rank)
         ranked = _dedupe_and_rank(all_chunks)
         answer = rag_service.generate(
-            state["question"], ranked[: settings.top_k * 2], history=history
+            state["question"], ranked[: settings.top_k * 2], history=history,
+            memory=state.get("memory_text", ""),
         )
         return {"answer": answer, "sources": [_to_source(c) for c in ranked],
                 "rounds": rounds}

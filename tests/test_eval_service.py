@@ -62,7 +62,7 @@ class StubRag:
             "similarity": 0.9,
         }]
 
-    def generate(self, query, chunks, history=None):
+    def generate(self, query, chunks, history=None, memory=""):
         self.generates.append(query)
         return self._answer
 

@@ -62,7 +62,7 @@ class StubRag:
             "similarity": self.similarity,
         }
 
-    def ask(self, query, top_k=None, history=None, tenant_id="default"):
+    def ask(self, query, top_k=None, history=None, tenant_id="default", memory=""):
         self.asks.append((query, history, tenant_id))
         return {
             "answer": "rag answer",
@@ -73,7 +73,7 @@ class StubRag:
         self.retrieves.append((query, tenant_id))
         return [self._chunk()]
 
-    def generate(self, query, chunks, history=None):
+    def generate(self, query, chunks, history=None, memory=""):
         self.generates.append((query, chunks, history))
         return "multi answer"
 

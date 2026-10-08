@@ -118,6 +118,19 @@ class Settings(BaseSettings):
     chat_timeout_s: float = 60.0    # /chat 单次请求超时
     rag_timeout_s: float = 30.0     # /rag/query 单次请求超时
 
+    # ── 长期记忆 (P5, 用户级) ────────────────────────────
+    # 默认**关闭**: 它会写入个人信息, 且每次成功回答多一次 LLM 抽取调用。
+    # 开启前提是能拿到可信 user_id (见 README「身份与隔离」), 否则全程不写不读。
+    memory_enabled: bool = False
+    # 记忆单独一个 collection —— 绝不能和知识库混在一起(检索会串味,
+    # 且"删一条记忆"与"删一篇文档"的语义完全不同)
+    memory_collection_name: str = "long_term_memory"
+    memory_top_k: int = 5                  # 每轮召回条数
+    memory_max_items: int = 200            # 每个用户的记忆上限 (超出按重要性淘汰)
+    memory_min_importance: float = Field(default=0.3, ge=0.0, le=1.0)
+    memory_recall_min_similarity: float = Field(default=0.35, ge=0.0, le=1.0)
+    memory_ttl_days: int = Field(default=180, ge=1)   # 陈旧记忆的清理阈值
+
     # ── 答案缓存 (P3) ────────────────────────────────────
     cache_enabled: bool = True      # 无会话相同问题的短 TTL 答案缓存
     cache_ttl_s: float = 300.0      # 缓存过期秒数

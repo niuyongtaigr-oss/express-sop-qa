@@ -11,6 +11,8 @@ class ChatState(TypedDict, total=False):
     question: str
     history: list[dict]    # 多轮会话历史: [{"role": "user"|"assistant", "content": str}]
     tenant_id: str         # 多租户 (P4): 检索/回答只在租户 + 共享库范围内
+    user_id: str           # 用户维度 (P5): 长期记忆按 (租户, 用户) 隔离
+    memory_text: str       # 长期记忆段落 (已格式化, 由 ChatService 注入)
     intent: str            # rag_qa / direct / multi_hop
     intent_reason: str
     answer: str

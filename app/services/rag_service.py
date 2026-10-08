@@ -320,10 +320,11 @@ class RagService:
         top_k: int | None = None,
         history: list[dict] | None = None,
         tenant_id: str = "default",
+        memory: str = "",
     ) -> dict:
-        """检索 + 生成一站式问答 (可带会话历史), 返回 {answer, sources}"""
+        """检索 + 生成一站式问答 (可带会话历史与长期记忆), 返回 {answer, sources}"""
         chunks = self.retrieve(query, top_k, tenant_id=tenant_id)
-        answer = self.generate(query, chunks, history=history)
+        answer = self.generate(query, chunks, history=history, memory=memory)
         return {"answer": answer, "sources": self._to_sources(chunks)}
 
     def generate(
@@ -331,6 +332,7 @@ class RagService:
         query: str,
         chunks: list[dict],
         history: list[dict] | None = None,
+        memory: str = "",
     ) -> str:
         """生成: 检索结果 + 会话历史 + 用户问题 → LLM 回答 (multi_hop 节点也复用)"""
         from langchain_core.messages import HumanMessage, SystemMessage
@@ -346,8 +348,11 @@ class RagService:
         context = "\n\n".join(context_parts) if context_parts else "(无检索结果)"
         history_text = _history_text(history)
         history_block = f"\n\n对话历史:\n{history_text}" if history_text else ""
+        # 记忆与参考文档**分成两段**: 一个是"这个用户说过的事"(可能过时, 可能
+        # 与语料冲突), 一个是权威语料。混在一起模型就分不清该以谁为准。
+        memory_block = f"{memory}\n\n" if memory else ""
         user_prompt = (
-            f"参考文档:\n{context}{history_block}\n\n"
+            f"{memory_block}参考文档:\n{context}{history_block}\n\n"
             f"用户问题: {query}\n\n"
             f"请根据上述参考文档回答用户问题:"
         )

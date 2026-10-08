@@ -101,7 +101,7 @@ class RoundRag:
         self._i += 1
         return [dict(c) for c in self._rounds[idx]]
 
-    def generate(self, query, chunks, history=None):
+    def generate(self, query, chunks, history=None, memory=""):
         self.generated_with = chunks
         return "multi answer"
 

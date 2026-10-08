@@ -20,7 +20,7 @@ from app.services.session_service import SessionStore
 __all__ = ["get_settings", "get_rag_service", "get_chat_service",
            "get_eval_service", "get_eval_tasks", "get_session_store",
            "get_feedback_store", "get_rate_limiter", "enforce_rate_limit",
-           "get_tenant_id", "get_user_id"]
+           "get_tenant_id", "get_user_id", "get_memory_service"]
 
 
 def get_rag_service(request: Request) -> RagService:
@@ -48,6 +48,11 @@ def get_session_store(request: Request) -> SessionStore:
 def get_feedback_store(request: Request) -> FeedbackStore:
     """用户反馈存储 (JSONL 持久化, 由 lifespan 创建)"""
     return request.app.state.feedback_store
+
+
+def get_memory_service(request: Request):
+    """长期记忆服务 (由 lifespan 创建; memory_enabled=false 时它不写不读)"""
+    return request.app.state.memory_service
 
 
 def get_rate_limiter(request: Request) -> RateLimiter:
