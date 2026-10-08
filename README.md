@@ -183,6 +183,8 @@ data: [DONE]
   （这条**不会被强制**：配反了只在启动时打一条 warning，原因见「安全」）
 - `SOP_QA_MULTI_HOP_MAX_ROUNDS` / `SOP_QA_MULTI_HOP_SIMILARITY_THRESHOLD`：多轮检索参数
 - `SOP_QA_CORS_ALLOW_ORIGINS`：逗号分隔的来源清单，**留空 = 关闭 CORS**（见「安全」）
+- `SOP_QA_TENANT_MODE` + `data/tenants.json`：多租户/多用户身份来源（`user_id` 可绑在 key 上，
+  见「身份与隔离」）
 - `SOP_QA_EVAL_JUDGE` / `SOP_QA_EVAL_CASES_PATH`：LLM-as-Judge 开关 / 评测集路径
 - `SOP_QA_ENV`：`dev` | `prod`（`prod` 下强制要求访问控制，见「安全」）
 - `SOP_QA_API_KEY`：API Key；`SOP_QA_TENANT_MODE`：多租户模式
@@ -224,20 +226,42 @@ RuntimeError: 生产模式 (SOP_QA_ENV=prod) 必须配置访问控制, 拒绝启
 
 两个探针都不做 API Key 校验（编排器不会带密钥），**只应暴露在集群内网**。
 
-### 会话隔离只到租户，不到用户
+### 身份与隔离：三层键，以及 user_id 凭什么可信
 
-`session_id` 由**调用方生成**，服务端只按 `(tenant_id, session_id)` 复合键隔离。
-接口强制 `session_id` 长度 ≥16：
+会话用 **(tenant_id, user_id, session_id) 三元组**做键；`session_id` 由调用方生成，
+接口强制长度 ≥16：
 
-- 多租户下：租户之间无法互相命中 ✅
-- **单租户下：谁能给出同一个 `session_id`，谁就能读到那段对话历史** ⚠️
+- 租户之间无法互相命中 ✅
+- **同一租户内的用户之间也无法互相命中** ✅ —— 前提是拿得到可信的 `user_id`
+- `user_id` 为空串表示"本次调用没有用户维度"，此时会话退化为租户级。
+  这是**退化**，不是等价设计，且 `""` 是一个独立维度取值（不与任何具名用户互相命中）
 
-所以 `session_id` 必须由调用方生成成不可猜测的值（建议 UUID4）。
-**若需要用户级隔离，得先引入用户身份概念——当前 API 没有这个维度。**
+**`user_id` 必须来自认证，不能由调用方断言。** 理由：`user_id` 天然可猜（工号、
+姓名、手机号），而长期记忆里装的是某个人的事实与偏好 —— 断言式 `user_id` 等于
+"猜到工号就能翻别人的档案"，比会话越权更严重。所以：
+
+| 部署方式 | `user_id` 来源 | 可信吗 |
+|---|---|---|
+| 多租户（`SOP_QA_TENANT_MODE=true`） | `data/tenants.json` 里每把 key 绑的 `user_id` | ✅ 来自认证 |
+| 单租户 + `SOP_QA_API_KEY` | 无来源 → 空串（用户级功能关闭） | — |
+| 未启用访问控制（仅本地开发） | `X-User-Id` 请求头 | ⚠️ 可断言，但这条通道**只在未启用访问控制时存在**；配了 key 或开了租户模式即自动关闭 |
+
+`tenants.json` 示例（同一租户下每用户一把 key）：
+
+```json
+[
+  {"api_key": "…", "tenant_id": "net-001", "user_id": "u-1001", "name": "张三"},
+  {"api_key": "…", "tenant_id": "net-001", "name": "网点公共账号"}
+]
+```
+
+与 `get_tenant_id` 的区别：租户取不到会**报错**（否则会读写默认租户的数据）；
+用户取不到返回空串（"没有用户维度"是合法部署形态）。
 
 反馈（`/chat/feedback`）里带 `question` / `answer` 用户原话，与会话历史是同一类
-数据，因此**同样按租户隔离**：统计与低分问题查询都只返回本租户的记录。（更早写入
+数据，因此**按租户隔离**：统计与低分问题查询都只返回本租户的记录。（更早写入
 的历史记录没有 `tenant_id` 字段，归入 `default` 租户。）
+
 
 ### CORS：默认关闭
 

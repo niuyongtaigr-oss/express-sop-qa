@@ -100,8 +100,12 @@ class ChatService:
         question: str,
         session_id: str | None = None,
         tenant_id: str = "default",
+        user_id: str = "",
     ) -> dict:
-        """非流式问答: 意图识别 → 路由 → 回答 (限流 + 超时降级 + 记忆 + 缓存)"""
+        """非流式问答: 意图识别 → 路由 → 回答 (限流 + 超时降级 + 记忆 + 缓存)
+
+        `user_id` 为空串表示本次调用没有用户维度 —— 此时会话退化为租户级。
+        """
         start = time.perf_counter()
         cached = False
         cache_key = None
@@ -121,7 +125,9 @@ class ChatService:
                 CACHE_MISSES.inc()
 
         if not cached:
-            result = await self._invoke_with_guard(question, session_id, tenant_id)
+            result = await self._invoke_with_guard(
+                question, session_id, tenant_id, user_id
+            )
             # 真实回答且无会话才写缓存; 降级/异常不入缓存
             if (
                 self._cache is not None
@@ -135,7 +141,7 @@ class ChatService:
         answer = result.get("answer", "")
         # 记忆回写: 只有真实回答才入库, 降级提示不污染历史
         if not cached and intent != "degraded":
-            self._sessions.add_turn(tenant_id, session_id, question, answer)
+            self._sessions.add_turn(tenant_id, user_id, session_id, question, answer)
         # Prometheus 指标
         CHAT_REQUESTS.labels(intent).inc()
         if not cached:
@@ -159,6 +165,7 @@ class ChatService:
         question: str,
         session_id: str | None = None,
         tenant_id: str = "default",
+        user_id: str = "",
     ) -> AsyncIterator[dict]:
         """流式问答 (SSE): 真 token 级流式, 事件见模块 docstring
 
@@ -171,7 +178,7 @@ class ChatService:
         副作用 (也是想要的行为): 断连时既不发 `done`, 也不回写会话记忆 ——
         此时 answer_parts 是半截的, 写进历史只会污染下一轮上下文。
         """
-        history = self._sessions.get_history(tenant_id, session_id)
+        history = self._sessions.get_history(tenant_id, user_id, session_id)
         answer_parts: list[str] = []
         intent = "unknown"
         degraded = False
@@ -205,7 +212,7 @@ class ChatService:
         # 只有走完正常路径 (非降级、非异常、且客户端没断连) 才回写记忆
         if not degraded and not failed:
             self._sessions.add_turn(
-                tenant_id, session_id, question, "".join(answer_parts)
+                tenant_id, user_id, session_id, question, "".join(answer_parts)
             )
         yield {
             "type": "done",
@@ -248,12 +255,16 @@ class ChatService:
 
     # ── 内部: 限流 + 超时降级 ─────────────────────────────
     async def _invoke_with_guard(
-        self, question: str, session_id: str | None, tenant_id: str = "default"
+        self,
+        question: str,
+        session_id: str | None,
+        tenant_id: str = "default",
+        user_id: str = "",
     ) -> dict:
         async def _run() -> dict:
             async with self._semaphore:
                 # 先取历史再进线程池 (读取很快, 不占信号量窗口太久)
-                history = self._sessions.get_history(tenant_id, session_id)
+                history = self._sessions.get_history(tenant_id, user_id, session_id)
                 # graph.invoke 是同步阻塞调用, 丢线程池执行
                 return await asyncio.to_thread(
                     self._graph.invoke,
@@ -261,6 +272,8 @@ class ChatService:
                         "question": question,
                         "history": history,
                         "tenant_id": tenant_id,
+                        # 记忆链路要用: 检索/写入都按 (租户, 用户) 隔离
+                        "user_id": user_id,
                     },
                 )
 

@@ -21,9 +21,16 @@ DEFAULT_TENANT = "default"
 
 @dataclass(frozen=True)
 class Tenant:
+    """一个调用主体: API Key → (租户, 用户)
+
+    `user_id` 可选。填了, 这把 key 就代表某个**具体用户** —— 用户级记忆与会话
+    隔离都依赖它 (可信, 因为来自认证而不是调用方断言)。
+    """
+
     api_key: str
     tenant_id: str
     name: str = ""
+    user_id: str = ""
 
 
 class TenantRegistry:
@@ -55,6 +62,7 @@ class TenantRegistry:
                     api_key=key,
                     tenant_id=str(item.get("tenant_id", "")).strip() or DEFAULT_TENANT,
                     name=str(item.get("name", "")),
+                    user_id=str(item.get("user_id", "")).strip(),
                 )
             with self._lock:
                 self._by_key = by_key

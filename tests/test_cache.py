@@ -219,4 +219,4 @@ async def test_chat_exception_not_written_to_history():
     sid = "s" * 20
     res = await svc.chat("问题", session_id=sid)
     assert res["intent"] == "degraded"
-    assert sessions.get_history("default", sid) == []
+    assert sessions.get_history("default", "", sid) == []

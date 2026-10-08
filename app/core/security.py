@@ -38,22 +38,30 @@ async def verify_api_key(
     provided = request.headers.get("X-API-Key", "")
 
     if settings.tenant_mode:
-        # 多租户: key → 租户映射
+        # 多租户: key → (租户, 用户) 映射
         registry: TenantRegistry = request.app.state.tenant_registry
         tenant = registry.resolve(provided or None)
         if tenant is None:
             raise UnauthorizedError("缺少或错误的 X-API-Key (未识别的租户密钥)")
         request.state.tenant_id = tenant.tenant_id
         request.state.tenant_name = tenant.name
+        # user_id 只在清单里显式绑定时才有 —— 它必须来自**认证结果**,
+        # 不能由调用方在请求里断言 (否则猜到工号就能读到那个人的记忆)
+        request.state.user_id = tenant.user_id
         return
 
     # 单租户: 可选校验 SOP_QA_API_KEY
     request.state.tenant_id = DEFAULT_TENANT
     request.state.tenant_name = ""
+    request.state.user_id = ""
     if not settings.api_key:
         if not _warned_no_key:
             _warned_no_key = True
             logger.warning("未配置 SOP_QA_API_KEY, API Key 校验处于放行状态 (仅限本地开发)")
+        # 未启用访问控制 (仅可能是本地开发, prod 会被 assert_secure_settings 拦下):
+        # 此时没有任何可信身份来源, 允许用 X-User-Id 断言, 否则用户级功能无法开发调试。
+        # 一旦配了 API Key 或开了租户模式, 这个分支就走不到 —— 断言通道自动关闭。
+        request.state.user_id = request.headers.get("X-User-Id", "").strip()
         return
     # compare_digest 防时序侧信道
     if not provided or not hmac.compare_digest(provided, settings.api_key):

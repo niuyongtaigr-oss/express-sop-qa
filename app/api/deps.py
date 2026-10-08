@@ -20,7 +20,7 @@ from app.services.session_service import SessionStore
 __all__ = ["get_settings", "get_rag_service", "get_chat_service",
            "get_eval_service", "get_eval_tasks", "get_session_store",
            "get_feedback_store", "get_rate_limiter", "enforce_rate_limit",
-           "get_tenant_id"]
+           "get_tenant_id", "get_user_id"]
 
 
 def get_rag_service(request: Request) -> RagService:
@@ -69,6 +69,19 @@ async def enforce_rate_limit(
             "请求过于频繁, 已触发限流, 请稍后重试",
             retry_after_s=retry_after,
         )
+
+
+def get_user_id(request: Request) -> str:
+    """当前请求的用户 (用户级会话/记忆的隔离维度), 由 verify_api_key 写入
+
+    **取不到就返回空串, 不回落到租户**: 空串表示"这次调用没有用户维度", 用户级
+    功能据此**关闭**(而不是把私人数据记到租户上让全租户可见)。回落到租户看似
+    更"可用", 但那是把隔离边界悄悄放宽, 属于方向性错误。
+
+    与 get_tenant_id 的区别: 租户取不到要报错(否则会读写默认租户的数据); 用户
+    取不到是一个**合法的部署形态**(单租户 + 一把共享 key), 所以返回空串。
+    """
+    return getattr(request.state, "user_id", "") or ""
 
 
 def get_tenant_id(request: Request) -> str:
