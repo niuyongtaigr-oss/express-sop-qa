@@ -30,6 +30,7 @@ from app.config import Settings
 from app.infrastructure.llm import LLMClient
 from app.infrastructure.memory_store import (
     KIND_FACT,
+    KIND_PREFERENCE,
     MemoryItem,
     MemoryStore,
 )
@@ -38,21 +39,35 @@ logger = logging.getLogger(__name__)
 
 _EXTRACT_SYSTEM = (
     "你负责从客服对话里提炼**值得长期记住**的关于该用户的信息。\n"
-    "只记三类:\n"
-    "- fact: 稳定的事实 (例如「用户负责华东区网点」「用户所在网点有 30 人」)\n"
-    "- preference: 偏好与要求 (例如「用户要求回答必须给出条款号」)\n"
-    "- episode: 值得记住的经历 (例如「用户上周反馈过一批暴力分拣导致的破损」)\n"
-    "**不要记**: 寒暄、一次性查询、知识库本身的内容(法规条文)、你不确定的信息。\n"
+    "分开记两类, 分别放进两个字段:\n"
+    "- facts: 稳定的事实 (例如「用户负责华东区网点」「用户所在网点有 30 人」)\n"
+    "- preferences: 用户对回答或服务提出的**要求** (例如「以后回答请带上条款号」\n"
+    "  「不要用表格」「回答简短点」)。只要用户提了要求就必须抽出来, 再小也算 ——\n"
+    "  这次不记, 下次就不会照做, 比不知道更让人恼火。\n"
+    "另有 episode (值得记住的经历, 放进 facts 并把 kind 写成 episode)。\n"
+    "**只记「用户」说的话**。「助手」的回答一律不是用户信息 —— 助手说「我会尽量简洁地\n"
+    "回答您」是助手的承诺, 不是用户的要求; 把它记成用户偏好等于凭空给用户安要求,\n"
+    "而且会覆盖掉用户真正提过的要求。\n"
+    "**不要记**: 寒暄、一次性查询、知识库本身的内容(法规条文)、助手说的话、你不确定的信息。\n"
     "importance 取 0~1: 越稳定、越会影响后续服务的越高; 拿不准就给 0.3 以下。\n"
-    "每条事实都必须给出 key(槽位名): 用简短名词短语概括「这条说的是哪件事」,\n"
-    "例如「居住地」「负责区域」「回答格式偏好」「所在网点」。**同一个槽位的不同版本\n"
+    "每条都必须给出 key(槽位名): 用简短名词短语概括「这条说的是哪件事」,\n"
+    "例如「居住地」「负责区域」「回答格式要求」「所在网点」。**同一个槽位的不同版本\n"
     "必须用同一个 key** —— 系统靠它发现「新旧版本冲突」, 留空就等于放弃了这件事。\n"
-    "没有值得记的就返回空列表 —— 宁可不记, 也不要记噪声。\n"
     "\n"
-    "示例 —— 用户说「我上个月调到杭州了，现在负责浙江这边」，正确输出是两条:\n"
-    '  {"text": "用户现居杭州", "kind": "fact", "key": "居住地", "importance": 0.8}\n'
-    '  {"text": "用户负责浙江区域", "kind": "fact", "key": "负责区域", "importance": 0.7}\n'
-    "注意 text 必须是**一句完整的话**(主语+内容), key 只是**两三个字的槽位名**,\n"
+    "示例 1 —— 用户说「我上个月调到杭州了，现在负责浙江这边」:\n"
+    '  {"facts": [{"text": "用户现居杭州", "kind": "fact", "key": "居住地", "importance": 0.8},\n'
+    '             {"text": "用户负责浙江区域", "kind": "fact", "key": "负责区域", "importance": 0.7}],\n'
+    '   "preferences": []}\n'
+    "  (这条没说要求, 所以 preferences 是空列表 —— 空是正常结果, 不要硬凑)\n"
+    "示例 2 —— 用户说「我常驻上海，负责华东区的网点。以后回答请带上条款号」:\n"
+    '  {"facts": [{"text": "用户常驻上海", "kind": "fact", "key": "居住地", "importance": 0.8},\n'
+    '             {"text": "用户负责华东区网点", "kind": "fact", "key": "负责区域", "importance": 0.7}],\n'
+    '   "preferences": [{"text": "用户要求回答必须带上条款号", "kind": "preference",\n'
+    '                    "key": "回答格式要求", "importance": 0.9}]}\n'
+    "  **preferences 不是空的** —— 用户提了要求。最容易被漏掉的就是这种「以后…请…」。\n"
+    "\n"
+    "没有值得记的就两个字段都返回空列表 —— 宁可不记, 也不要记噪声。\n"
+    "text 必须是**一句完整的话**(主语+内容), key 只是**两三个字的槽位名**,\n"
     "两者绝不能相同, 也绝不能把 key 写进 text。"
 )
 
@@ -88,7 +103,21 @@ class MemoryFact(BaseModel):
 
 
 class MemoryExtraction(BaseModel):
-    facts: list[MemoryFact] = []
+    """抽取结果 —— **事实与偏好是分开的两个字段, 不靠 kind 区分**
+
+    实测(qwen2.5:7b): 两类放在同一个列表里、用 kind 区分时, 偏好会被事实整个吞掉 ——
+    提示词里加了偏好示例、列了偏好信号词, 依然一条偏好都抽不出来。改成两个独立字段
+    后模型才会分别考虑。类别由**字段**决定(代码强制 kind), 不给模型选错的机会。
+    """
+
+    facts: list[MemoryFact] = Field(
+        default=[], description="用户陈述的稳定事实(居住地/负责区域/所在网点/规模等)"
+    )
+    preferences: list[MemoryFact] = Field(
+        default=[],
+        description="用户对回答或服务提出的要求, 例如「以后回答请带上条款号」「不要用表格」。"
+                    "**只要提了要求就必须抽出来**, 再小也算。",
+    )
 
 
 class MemoryOp(BaseModel):
@@ -225,15 +254,20 @@ class MemoryService:
             out = self._llm.structured_invoke(
                 MemoryExtraction,
                 [SystemMessage(content=_EXTRACT_SYSTEM),
-                 HumanMessage(content=f"用户: {question}\n助手: {answer}")],
+                 HumanMessage(content=f"【用户】{question}\n【助手】{answer}")],
             )
         except Exception:
             logger.warning("记忆抽取失败, 本轮不记", exc_info=True)
             return []
-        facts = [f for f in out.facts if _fact_is_sane(f)]
-        if len(facts) != len(out.facts):
+        raw = list(out.facts) + list(out.preferences)
+        facts = [f for f in raw if _fact_is_sane(f)]
+        if len(facts) != len(raw):
             logger.warning("丢弃 %d 条退化抽取结果 (text 过短或等于 key)",
-                           len(out.facts) - len(facts))
+                           len(raw) - len(facts))
+        # kind 由"来自哪个字段"决定 —— 模型把偏好写进 facts 也纠正得回来
+        for f in out.preferences:
+            if _fact_is_sane(f):
+                f.kind = KIND_PREFERENCE
         return facts
 
     def _candidates(

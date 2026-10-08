@@ -189,11 +189,8 @@ class _RecordingMemory(MemoryService):
 
 
 async def _drain(svc) -> None:
-    """等后台记忆任务跑完 (fire-and-forget 的任务, 测试要主动等)"""
-    for _ in range(20):
-        if not svc._memory_tasks:
-            return
-        await asyncio.sleep(0.01)
+    """等后台记忆任务跑完 —— 用 ChatService 自己的等待点, 不猜 sleep 时长"""
+    await svc.flush_memory()
 
 
 @pytest.mark.asyncio

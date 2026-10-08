@@ -546,3 +546,54 @@ def test_normal_update_still_applies(tmp_path):
     stats = svc.remember("我调到杭州了", "好的", "t1", "u1")
     assert stats["updated"] == 1
     assert [m.text for m in store.list("t1", "u1")] == ["用户现居杭州"]
+
+
+# ── 事实与偏好必须分开抽 (实测: 合在一起偏好会被吞掉) ─────
+# 真实 7B 模型的实测: 把两类放在同一个列表里、用 kind 区分时, 偏好**一条都抽不出来** ——
+# 提示词里加偏好示例、列偏好信号词都没用。改成两个独立字段后模型才会分别考虑。
+# 这几条测试锁住这个设计, 防止有人"顺手合并"回一个列表。
+
+def test_preferences_field_is_stored_as_preference_kind(tmp_path):
+    """来自 preferences 字段的条目, kind 由**代码**强制, 不信任模型填的 kind"""
+    store = _store(tmp_path)
+    svc = MemoryService(store, StubLLM(extraction=MemoryExtraction(
+        facts=[MemoryFact(text="用户常驻上海", kind="fact", key="居住地", importance=0.8)],
+        preferences=[MemoryFact(text="用户要求回答必须带上条款号", kind="fact",  # 模型填错了
+                                key="回答格式要求", importance=0.9)],
+    )), _settings())
+
+    stats = svc.remember("我常驻上海。以后回答请带上条款号。", "好的", "t1", "u1")
+    assert stats["extracted"] == 2 and stats["added"] == 2
+    kinds = {m.text: m.kind for m in store.list("t1", "u1")}
+    assert kinds["用户要求回答必须带上条款号"] == "preference"      # 被纠正
+    assert kinds["用户常驻上海"] == "fact"
+
+
+def test_preference_survives_alongside_facts(tmp_path):
+    """一句话里既有事实又有偏好时, 两边都要落库 (实测的失败模式就是偏好被丢掉)"""
+    store = _store(tmp_path)
+    svc = MemoryService(store, StubLLM(extraction=MemoryExtraction(
+        facts=[
+            MemoryFact(text="用户常驻上海", key="居住地", importance=0.8),
+            MemoryFact(text="用户负责华东区网点", key="负责区域", importance=0.7),
+        ],
+        preferences=[
+            MemoryFact(text="用户要求回答必须带上条款号", key="回答格式要求", importance=0.9),
+        ],
+    )), _settings())
+
+    svc.remember("我常驻上海，负责华东区的网点。以后回答请带上条款号。", "好的", "t1", "u1")
+    assert len(store.list("t1", "u1")) == 3
+    assert sum(1 for m in store.list("t1", "u1") if m.kind == "preference") == 1
+
+
+def test_degenerate_preference_is_also_dropped(tmp_path):
+    """质量门对偏好同样生效 (退化输出不分字段)"""
+    store = _store(tmp_path)
+    svc = MemoryService(store, StubLLM(extraction=MemoryExtraction(
+        facts=[], preferences=[MemoryFact(text="回答格式要求", key="回答格式要求",
+                                          importance=0.9)],
+    )), _settings())
+
+    stats = svc.remember("以后回答请带上条款号", "好的", "t1", "u1")
+    assert stats["extracted"] == 0 and store.count("t1", "u1") == 0

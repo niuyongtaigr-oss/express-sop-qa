@@ -1,0 +1,155 @@
+{
+  "_comment": [
+    "长期记忆跨会话评测 — 有序脚本, 不是一堆独立用例。",
+    "为什么有序: 真实 LLM 下每轮回答约 40s、每次记忆抽取约 20s, 逐条独立跑要 20 分钟。",
+    "把 setup 复用到多个探针上, 才能在一次运行里同时量出召回/时效/隔离/误记。",
+    "",
+    "step 类型:",
+    "  turn   跑一轮问答(会触发记忆写入), 用于铺垫事实或制造冲突",
+    "  check  跑一轮问答并断言答案内容 (expect_any 至少要命中一个; expect_none 一个都不许出现)",
+    "  no_memory 跑一轮**不该被记住**的对话, 用来量误记率",
+    "",
+    "用户 u-eval-1 是主用户, u-eval-2 只用来验证跨用户不可见。",
+    "check 步骤必须带 dimension: recall(说过的事答得出吗) / conflict(旧值有没有被换掉) / isolation(别人的记忆有没有漏出来) —— 显式声明, 不靠 expect_none 猜。",
+    "check 还可以带 expect_memory_any / expect_memory_none: 断言**记忆库里实际存了什么**。只看答案会被模型自己编的引用骗过去(实测答案里出现「根据条款3」, 让 expect_any=['条款'] 白白通过)。"
+  ],
+  "probes": [
+    {
+      "id": "setup-facts",
+      "kind": "turn",
+      "user": "u-eval-1",
+      "question": "我常驻上海，负责华东区的网点。以后回答请带上条款号。"
+    },
+    {
+      "id": "recall-city",
+      "kind": "check",
+      "user": "u-eval-1",
+      "question": "我常驻哪个城市？",
+      "expect_any": [
+        "上海"
+      ],
+      "expect_none": [],
+      "dimension": "recall"
+    },
+    {
+      "id": "recall-region",
+      "kind": "check",
+      "user": "u-eval-1",
+      "question": "我负责哪个区域？",
+      "expect_any": [
+        "华东"
+      ],
+      "expect_none": [],
+      "dimension": "recall"
+    },
+    {
+      "id": "recall-preference",
+      "kind": "check",
+      "user": "u-eval-1",
+      "question": "你回答我的问题时有什么格式要求？",
+      "expect_any": [
+        "条款"
+      ],
+      "expect_none": [],
+      "dimension": "recall",
+      "expect_memory_any": [
+        "条款号"
+      ]
+    },
+    {
+      "id": "cross-user-leak",
+      "kind": "check",
+      "user": "u-eval-2",
+      "question": "我常驻哪个城市？负责哪个区域？",
+      "expect_any": [],
+      "expect_none": [
+        "上海",
+        "华东"
+      ],
+      "_note": "另一个用户不该看到任何关于 u-eval-1 的信息; 这是隔离的核心断言",
+      "dimension": "isolation",
+      "expect_memory_none": [
+        "上海",
+        "华东",
+        "条款号"
+      ]
+    },
+    {
+      "id": "chitchat-not-remembered",
+      "kind": "no_memory",
+      "user": "u-eval-1",
+      "question": "谢谢你，今天辛苦了！"
+    },
+    {
+      "id": "kb-question-not-remembered",
+      "kind": "no_memory",
+      "user": "u-eval-1",
+      "question": "快递暂行条例是哪一年施行的？"
+    },
+    {
+      "id": "conflict-move",
+      "kind": "turn",
+      "user": "u-eval-1",
+      "question": "我上个月调到杭州了，现在负责浙江这边。"
+    },
+    {
+      "id": "after-move-city",
+      "kind": "check",
+      "user": "u-eval-1",
+      "question": "我常驻哪个城市？",
+      "expect_any": [
+        "杭州"
+      ],
+      "expect_none": [
+        "上海"
+      ],
+      "_note": "旧值必须被 UPDATE 掉; 并存就是典型的记忆精神分裂",
+      "dimension": "conflict",
+      "expect_memory_any": [
+        "杭州"
+      ],
+      "expect_memory_none": [
+        "上海"
+      ]
+    },
+    {
+      "id": "after-move-region",
+      "kind": "check",
+      "user": "u-eval-1",
+      "question": "我负责哪个区域？",
+      "expect_any": [
+        "浙江"
+      ],
+      "expect_none": [
+        "华东"
+      ],
+      "_note": "同上, 换个槽位再验一次",
+      "dimension": "conflict",
+      "expect_memory_any": [
+        "浙江"
+      ],
+      "expect_memory_none": [
+        "华东"
+      ]
+    },
+    {
+      "id": "preference-survives-update",
+      "kind": "check",
+      "user": "u-eval-1",
+      "question": "你回答我的问题时有什么格式要求？",
+      "expect_any": [
+        "条款"
+      ],
+      "expect_none": [],
+      "_note": "更新别的槽位时, 不该把无关的偏好一起弄丢",
+      "dimension": "conflict",
+      "expect_memory_any": [
+        "条款号"
+      ],
+      "expect_memory_none": [
+        "友好简洁",
+        "简洁友好"
+      ]
+    }
+  ]
+}

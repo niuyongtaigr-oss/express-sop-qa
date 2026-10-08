@@ -303,6 +303,16 @@ class ChatService:
         self._memory_tasks.add(task)
         task.add_done_callback(self._memory_tasks.discard)
 
+    async def flush_memory(self) -> None:
+        """等所有后台记忆写入落定。
+
+        生产路径**不需要**调它 (fire-and-forget 就是设计意图)。它是给评测与测试用的:
+        要断言"这轮到底记了什么", 就得有一个明确的等待点, 而不是 sleep 一个猜出来的
+        秒数 —— 后者在慢机器上会随机变红。
+        """
+        if self._memory_tasks:
+            await asyncio.gather(*list(self._memory_tasks), return_exceptions=True)
+
     async def _invoke_with_guard(
         self,
         question: str,
